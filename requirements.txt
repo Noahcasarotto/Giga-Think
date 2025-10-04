@@ -1,0 +1,9 @@
+# Core dependencies
+python-dotenv==1.0.1
+
+# OpenRouter uses OpenAI-compatible API
+openai==1.54.3
+
+# Utilities
+requests==2.32.3
+
