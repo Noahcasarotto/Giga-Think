@@ -43,12 +43,3 @@ Thumbs.db
 # Test outputs
 test_outputs/
 
-
-# SWE-bench clone (large, don't commit)
-SWE-bench/
-
-# Test results
-testing/*.json
-testing/*.jsonl
-testing/*.log
-testing/*.txt
