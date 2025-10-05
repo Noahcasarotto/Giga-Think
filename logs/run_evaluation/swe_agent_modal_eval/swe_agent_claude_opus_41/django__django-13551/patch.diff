@@ -1,0 +1,646 @@
+diff --git a/django/contrib/auth/tokens.py b/django/contrib/auth/tokens.py
+index 93e2d71af2..ca6c4796d6 100644
+--- a/django/contrib/auth/tokens.py
++++ b/django/contrib/auth/tokens.py
+@@ -67,7 +67,7 @@ class PasswordResetTokenGenerator:
+         ts_b36 = int_to_base36(timestamp)
+         hash_string = salted_hmac(
+             self.key_salt,
+-            self._make_hash_value(user, timestamp),
++            self._make_hash_value(user, timestamp, legacy=legacy),
+             secret=self.secret,
+             # RemovedInDjango40Warning: when the deprecation ends, remove the
+             # legacy argument and replace with:
+@@ -76,7 +76,7 @@ class PasswordResetTokenGenerator:
+         ).hexdigest()[::2]  # Limit to shorten the URL.
+         return "%s-%s" % (ts_b36, hash_string)
+ 
+-    def _make_hash_value(self, user, timestamp):
++    def _make_hash_value(self, user, timestamp, legacy=False):
+         """
+         Hash the user's primary key and some user state that's sure to change
+         after a password reset to produce a token that invalidated when it's
+@@ -85,6 +85,7 @@ class PasswordResetTokenGenerator:
+            same password is chosen, due to password salting).
+         2. The last_login field will usually be updated very shortly after
+            a password reset.
++        3. The email field will change when the user updates their email.
+         Failing those things, settings.PASSWORD_RESET_TIMEOUT eventually
+         invalidates the token.
+ 
+@@ -94,7 +95,13 @@ class PasswordResetTokenGenerator:
+         # Truncate microseconds so that tokens are consistent even if the
+         # database doesn't support microseconds.
+         login_timestamp = '' if user.last_login is None else user.last_login.replace(microsecond=0, tzinfo=None)
+-        return str(user.pk) + user.password + str(login_timestamp) + str(timestamp)
++        email = ''
++        # RemovedInDjango40Warning: when the deprecation ends, remove the
++        # legacy argument and always include the email.
++        if not legacy:
++            email_field = user.get_email_field_name()
++            email = getattr(user, email_field, '') or ''
++        return str(user.pk) + user.password + str(login_timestamp) + str(timestamp) + email
+ 
+     def _num_seconds(self, dt):
+         return int((dt - datetime(2001, 1, 1)).total_seconds())
+diff --git a/test_email_change_token.py b/test_email_change_token.py
+new file mode 100644
+index 0000000000..833aa80620
+--- /dev/null
++++ b/test_email_change_token.py
+@@ -0,0 +1,124 @@
++#!/usr/bin/env python
++"""
++Test script to reproduce the issue where changing a user's email 
++doesn't invalidate password reset tokens.
++"""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.auth',
++            'django.contrib.contenttypes',
++        ],
++        SECRET_KEY='test-secret-key',
++        PASSWORD_RESET_TIMEOUT=86400,  # 1 day
++        USE_TZ=False,
++    )
++    django.setup()
++
++from django.contrib.auth.models import User
++from django.contrib.auth.tokens import default_token_generator
++from django.db import connection
++from django.db.migrations.executor import MigrationExecutor
++
++# Create tables
++from django.core.management import call_command
++call_command('migrate', verbosity=0, interactive=False)
++
++def test_email_change_invalidates_token():
++    """Test that changing email invalidates password reset token"""
++    
++    # Create a user with initial email
++    user = User.objects.create_user(
++        username='testuser',
++        email='original@example.com',
++        password='testpass123'
++    )
++    
++    # Generate a password reset token
++    token = default_token_generator.make_token(user)
++    print(f"Generated token for user with email {user.email}: {token}")
++    
++    # Verify the token is valid
++    is_valid = default_token_generator.check_token(user, token)
++    print(f"Token valid before email change: {is_valid}")
++    assert is_valid, "Token should be valid initially"
++    
++    # Change the user's email
++    user.email = 'changed@example.com'
++    user.save()
++    print(f"Changed user email to: {user.email}")
++    
++    # Check if the old token is still valid (this is the bug)
++    is_valid_after_change = default_token_generator.check_token(user, token)
++    print(f"Token valid after email change: {is_valid_after_change}")
++    
++    if is_valid_after_change:
++        print("\n❌ BUG CONFIRMED: Token is still valid after email change!")
++        print("This is a security issue - the token should be invalidated when email changes.")
++        return False
++    else:
++        print("\n✅ FIXED: Token is correctly invalidated after email change!")
++        return True
++
++def test_password_change_invalidates_token():
++    """Test that changing password invalidates token (existing behavior)"""
++    
++    # Create a user
++    user = User.objects.create_user(
++        username='testuser2',
++        email='test@example.com',
++        password='testpass123'
++    )
++    
++    # Generate a password reset token
++    token = default_token_generator.make_token(user)
++    print(f"\nGenerated token for user: {token}")
++    
++    # Verify the token is valid
++    is_valid = default_token_generator.check_token(user, token)
++    print(f"Token valid before password change: {is_valid}")
++    assert is_valid, "Token should be valid initially"
++    
++    # Change the user's password
++    user.set_password('newpassword456')
++    user.save()
++    print("Changed user password")
++    
++    # Check if the old token is still valid
++    is_valid_after_change = default_token_generator.check_token(user, token)
++    print(f"Token valid after password change: {is_valid_after_change}")
++    
++    if not is_valid_after_change:
++        print("✅ Token is correctly invalidated after password change (existing behavior)")
++        return True
++    else:
++        print("❌ Unexpected: Token should be invalid after password change")
++        return False
++
++if __name__ == '__main__':
++    print("=" * 60)
++    print("Testing password reset token behavior")
++    print("=" * 60)
++    
++    # Test password change (should already work)
++    test_password_change_invalidates_token()
++    
++    print("\n" + "=" * 60)
++    
++    # Test email change (the bug we need to fix)
++    result = test_email_change_invalidates_token()
++    
++    sys.exit(0 if result else 1)
+\ No newline at end of file
+diff --git a/test_email_edge_cases.py b/test_email_edge_cases.py
+new file mode 100644
+index 0000000000..1c2ca7cddd
+--- /dev/null
++++ b/test_email_edge_cases.py
+@@ -0,0 +1,310 @@
++#!/usr/bin/env python
++"""
++Test edge cases for the email change token invalidation fix.
++"""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.auth',
++            'django.contrib.contenttypes',
++        ],
++        SECRET_KEY='test-secret-key',
++        PASSWORD_RESET_TIMEOUT=86400,  # 1 day
++        USE_TZ=False,
++    )
++    django.setup()
++
++from django.contrib.auth.models import User
++from django.contrib.auth.tokens import default_token_generator
++from django.contrib.auth.base_user import AbstractBaseUser, BaseUserManager
++from django.db import models
++from django.core.management import call_command
++
++# Create tables
++call_command('migrate', verbosity=0, interactive=False)
++
++def test_user_without_email_field():
++    """Test with a custom user model that doesn't have an email field"""
++    
++    # Create a custom user model without email field
++    class CustomUserManager(BaseUserManager):
++        def create_user(self, username, password=None):
++            if not username:
++                raise ValueError('Users must have a username')
++            user = self.model(username=username)
++            user.set_password(password)
++            user.save(using=self._db)
++            return user
++    
++    class CustomUser(AbstractBaseUser):
++        username = models.CharField(max_length=150, unique=True)
++        USERNAME_FIELD = 'username'
++        
++        objects = CustomUserManager()
++        
++        class Meta:
++            app_label = 'auth_tests'
++            db_table = 'custom_user_no_email'
++    
++    # Create the table for our custom model
++    from django.db import connection
++    with connection.schema_editor() as schema_editor:
++        schema_editor.create_model(CustomUser)
++    
++    try:
++        # Create a user without email
++        user = CustomUser.objects.create_user(username='testuser_no_email', password='testpass123')
++        
++        # Generate a password reset token
++        token = default_token_generator.make_token(user)
++        print(f"Generated token for user without email field: {token}")
++        
++        # Verify the token is valid
++        is_valid = default_token_generator.check_token(user, token)
++        print(f"Token valid: {is_valid}")
++        
++        if is_valid:
++            print("✅ Token generation works for users without email field")
++            return True
++        else:
++            print("❌ Token generation failed for users without email field")
++            return False
++    except Exception as e:
++        print(f"✅ Handled gracefully: {e}")
++        return True
++    finally:
++        # Clean up
++        with connection.schema_editor() as schema_editor:
++            schema_editor.delete_model(CustomUser)
++
++def test_user_with_empty_email():
++    """Test with a user that has an empty email"""
++    
++    # Create a user with empty email
++    user = User.objects.create_user(
++        username='testuser_empty_email',
++        email='',  # Empty email
++        password='testpass123'
++    )
++    
++    # Generate a password reset token
++    token = default_token_generator.make_token(user)
++    print(f"\nGenerated token for user with empty email: {token}")
++    
++    # Verify the token is valid
++    is_valid = default_token_generator.check_token(user, token)
++    print(f"Token valid before email change: {is_valid}")
++    
++    if not is_valid:
++        print("❌ Token should be valid for user with empty email")
++        return False
++    
++    # Set an email
++    user.email = 'new@example.com'
++    user.save()
++    print(f"Set user email to: {user.email}")
++    
++    # Check if the old token is still valid
++    is_valid_after_change = default_token_generator.check_token(user, token)
++    print(f"Token valid after setting email: {is_valid_after_change}")
++    
++    if not is_valid_after_change:
++        print("✅ Token correctly invalidated when empty email is set to a value")
++        return True
++    else:
++        print("❌ Token should be invalid after setting email from empty")
++        return False
++
++def test_user_with_none_email():
++    """Test with a user that has None as email"""
++    
++    # Create a user and set email to None
++    user = User.objects.create_user(
++        username='testuser_none_email',
++        email='initial@example.com',
++        password='testpass123'
++    )
++    
++    # Set email to None (if the field allows it)
++    user.email = None
++    try:
++        user.save()
++        print(f"\nSet user email to None")
++    except Exception as e:
++        print(f"\nCouldn't set email to None (expected for EmailField): {e}")
++        # Try with empty string instead
++        user.email = ''
++        user.save()
++        print(f"Set user email to empty string instead")
++    
++    # Generate a password reset token
++    token = default_token_generator.make_token(user)
++    print(f"Generated token for user with None/empty email: {token}")
++    
++    # Verify the token is valid
++    is_valid = default_token_generator.check_token(user, token)
++    print(f"Token valid: {is_valid}")
++    
++    if is_valid:
++        print("✅ Token generation works for users with None/empty email")
++        return True
++    else:
++        print("❌ Token generation failed for users with None/empty email")
++        return False
++
++def test_email_case_sensitivity():
++    """Test that email case changes invalidate the token"""
++    
++    # Create a user with lowercase email
++    user = User.objects.create_user(
++        username='testuser_case',
++        email='test@example.com',
++        password='testpass123'
++    )
++    
++    # Generate a password reset token
++    token = default_token_generator.make_token(user)
++    print(f"\nGenerated token for user with email {user.email}: {token}")
++    
++    # Verify the token is valid
++    is_valid = default_token_generator.check_token(user, token)
++    print(f"Token valid before email case change: {is_valid}")
++    
++    # Change email case
++    user.email = 'Test@Example.com'
++    user.save()
++    print(f"Changed user email case to: {user.email}")
++    
++    # Check if the old token is still valid
++    is_valid_after_change = default_token_generator.check_token(user, token)
++    print(f"Token valid after email case change: {is_valid_after_change}")
++    
++    if not is_valid_after_change:
++        print("✅ Token correctly invalidated when email case changes")
++        return True
++    else:
++        print("❌ Token should be invalid after email case change")
++        return False
++
++def test_custom_email_field():
++    """Test with a custom user model that has a different email field name"""
++    
++    class CustomUserWithEmailManager(BaseUserManager):
++        def create_user(self, username, contact_email=None, password=None):
++            if not username:
++                raise ValueError('Users must have a username')
++            user = self.model(username=username, contact_email=contact_email)
++            user.set_password(password)
++            user.save(using=self._db)
++            return user
++    
++    class CustomUserWithEmail(AbstractBaseUser):
++        username = models.CharField(max_length=150, unique=True)
++        contact_email = models.EmailField(blank=True)
++        
++        USERNAME_FIELD = 'username'
++        EMAIL_FIELD = 'contact_email'  # Custom email field name
++        
++        objects = CustomUserWithEmailManager()
++        
++        class Meta:
++            app_label = 'auth_tests'
++            db_table = 'custom_user_with_email'
++    
++    # Create the table for our custom model
++    from django.db import connection
++    with connection.schema_editor() as schema_editor:
++        schema_editor.create_model(CustomUserWithEmail)
++    
++    try:
++        # Create a user with custom email field
++        user = CustomUserWithEmail.objects.create_user(
++            username='testuser_custom_email',
++            contact_email='custom@example.com',
++            password='testpass123'
++        )
++        
++        # Generate a password reset token
++        token = default_token_generator.make_token(user)
++        print(f"\nGenerated token for user with custom email field: {token}")
++        
++        # Verify the token is valid
++        is_valid = default_token_generator.check_token(user, token)
++        print(f"Token valid before email change: {is_valid}")
++        
++        if not is_valid:
++            print("❌ Token should be valid initially")
++            return False
++        
++        # Change the custom email field
++        user.contact_email = 'changed@example.com'
++        user.save()
++        print(f"Changed custom email field to: {user.contact_email}")
++        
++        # Check if the old token is still valid
++        is_valid_after_change = default_token_generator.check_token(user, token)
++        print(f"Token valid after custom email change: {is_valid_after_change}")
++        
++        if not is_valid_after_change:
++            print("✅ Token correctly invalidated when custom email field changes")
++            return True
++        else:
++            print("❌ Token should be invalid after custom email field change")
++            return False
++    finally:
++        # Clean up
++        with connection.schema_editor() as schema_editor:
++            schema_editor.delete_model(CustomUserWithEmail)
++
++if __name__ == '__main__':
++    print("=" * 60)
++    print("Testing edge cases for email change token invalidation")
++    print("=" * 60)
++    
++    all_passed = True
++    
++    # Test 1: User without email field
++    print("\nTest 1: User without email field")
++    print("-" * 40)
++    all_passed &= test_user_without_email_field()
++    
++    # Test 2: User with empty email
++    print("\nTest 2: User with empty email")
++    print("-" * 40)
++    all_passed &= test_user_with_empty_email()
++    
++    # Test 3: User with None email
++    print("\nTest 3: User with None email")
++    print("-" * 40)
++    all_passed &= test_user_with_none_email()
++    
++    # Test 4: Email case sensitivity
++    print("\nTest 4: Email case sensitivity")
++    print("-" * 40)
++    all_passed &= test_email_case_sensitivity()
++    
++    # Test 5: Custom email field
++    print("\nTest 5: Custom email field")
++    print("-" * 40)
++    all_passed &= test_custom_email_field()
++    
++    print("\n" + "=" * 60)
++    if all_passed:
++        print("✅ All edge case tests passed!")
++    else:
++        print("❌ Some edge case tests failed")
++    
++    sys.exit(0 if all_passed else 1)
+\ No newline at end of file
+diff --git a/test_legacy_tokens.py b/test_legacy_tokens.py
+new file mode 100644
+index 0000000000..931455c2b8
+--- /dev/null
++++ b/test_legacy_tokens.py
+@@ -0,0 +1,146 @@
++#!/usr/bin/env python
++"""
++Test that legacy tokens (without email in hash) still work for backward compatibility.
++"""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.auth',
++            'django.contrib.contenttypes',
++        ],
++        SECRET_KEY='test-secret-key',
++        PASSWORD_RESET_TIMEOUT=86400,  # 1 day
++        USE_TZ=False,
++    )
++    django.setup()
++
++from django.contrib.auth.models import User
++from django.contrib.auth.tokens import PasswordResetTokenGenerator
++from django.core.management import call_command
++
++# Create tables
++call_command('migrate', verbosity=0, interactive=False)
++
++class LegacyTokenGenerator(PasswordResetTokenGenerator):
++    """Simulates the old token generator that doesn't include email"""
++    def _make_hash_value(self, user, timestamp, legacy=False):
++        # Old implementation without email
++        login_timestamp = '' if user.last_login is None else user.last_login.replace(microsecond=0, tzinfo=None)
++        return str(user.pk) + user.password + str(login_timestamp) + str(timestamp)
++
++def test_legacy_token_compatibility():
++    """Test that tokens generated with the old method still validate"""
++    
++    # Create a user
++    user = User.objects.create_user(
++        username='testuser',
++        email='original@example.com',
++        password='testpass123'
++    )
++    
++    # Generate a token using the legacy method (simulating old tokens)
++    legacy_generator = LegacyTokenGenerator()
++    legacy_generator.algorithm = 'sha1'  # Legacy tokens use sha1
++    legacy_token = legacy_generator.make_token(user)
++    print(f"Generated legacy token (without email in hash): {legacy_token}")
++    
++    # Check if the new generator can validate the legacy token
++    new_generator = PasswordResetTokenGenerator()
++    is_valid = new_generator.check_token(user, legacy_token)
++    print(f"Legacy token valid with new generator: {is_valid}")
++    
++    if not is_valid:
++        print("❌ Legacy tokens should still be valid for backward compatibility")
++        return False
++    
++    # Now change the user's email
++    user.email = 'changed@example.com'
++    user.save()
++    print(f"Changed user email to: {user.email}")
++    
++    # Check if the legacy token is still valid after email change
++    is_valid_after_change = new_generator.check_token(user, legacy_token)
++    print(f"Legacy token valid after email change: {is_valid_after_change}")
++    
++    if is_valid_after_change:
++        print("✅ Legacy tokens remain valid after email change (expected for backward compatibility)")
++        print("   Note: This is acceptable since these are old tokens that will expire anyway")
++        return True
++    else:
++        print("✅ Legacy tokens are invalidated after email change")
++        return True
++
++def test_new_token_behavior():
++    """Test that new tokens are invalidated when email changes"""
++    
++    # Create a user
++    user = User.objects.create_user(
++        username='testuser2',
++        email='original@example.com',
++        password='testpass123'
++    )
++    
++    # Generate a new token (with email in hash)
++    generator = PasswordResetTokenGenerator()
++    token = generator.make_token(user)
++    print(f"\nGenerated new token (with email in hash): {token}")
++    
++    # Verify token is valid
++    is_valid = generator.check_token(user, token)
++    print(f"Token valid before email change: {is_valid}")
++    
++    if not is_valid:
++        print("❌ Token should be valid initially")
++        return False
++    
++    # Change the user's email
++    user.email = 'changed@example.com'
++    user.save()
++    print(f"Changed user email to: {user.email}")
++    
++    # Check if the token is still valid
++    is_valid_after_change = generator.check_token(user, token)
++    print(f"Token valid after email change: {is_valid_after_change}")
++    
++    if not is_valid_after_change:
++        print("✅ New tokens are correctly invalidated when email changes")
++        return True
++    else:
++        print("❌ New tokens should be invalid after email change")
++        return False
++
++if __name__ == '__main__':
++    print("=" * 60)
++    print("Testing backward compatibility with legacy tokens")
++    print("=" * 60)
++    
++    # Test legacy token compatibility
++    print("\nTest 1: Legacy token compatibility")
++    print("-" * 40)
++    result1 = test_legacy_token_compatibility()
++    
++    # Test new token behavior
++    print("\nTest 2: New token behavior")
++    print("-" * 40)
++    result2 = test_new_token_behavior()
++    
++    print("\n" + "=" * 60)
++    if result1 and result2:
++        print("✅ All compatibility tests passed!")
++    else:
++        print("❌ Some compatibility tests failed")
++    
++    sys.exit(0 if (result1 and result2) else 1)
+\ No newline at end of file

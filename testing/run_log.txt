@@ -1,0 +1,48 @@
+Loading SWE-bench Lite dataset...
+/Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/importlib/__init__.py:90: UserWarning: A NumPy version >=1.22.4 and <2.3.0 is required for this version of SciPy (detected version 2.3.3)
+  return _bootstrap._gcd_import(name[level:], package, level)
+Traceback (most recent call last):
+  File "/Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/site-packages/scipy/__init__.py", line 86, in <module>
+    from scipy._lib._ccallback import LowLevelCallable
+  File "/Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/site-packages/scipy/_lib/_ccallback.py", line 1, in <module>
+    from . import _ccallback_c
+ImportError: dlopen(/Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/site-packages/scipy/_lib/_ccallback_c.cpython-312-darwin.so, 0x0002): tried: '/Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/site-packages/scipy/_lib/_ccallback_c.cpython-312-darwin.so' (mach-o file, but is an incompatible architecture (have 'x86_64', need 'arm64e' or 'arm64')), '/System/Volumes/Preboot/Cryptexes/OS/Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/site-packages/scipy/_lib/_ccallback_c.cpython-312-darwin.so' (no such file), '/Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/site-packages/scipy/_lib/_ccallback_c.cpython-312-darwin.so' (mach-o file, but is an incompatible architecture (have 'x86_64', need 'arm64e' or 'arm64'))
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/Users/noahcasarotto-dinning/All of Coding/Giga-Think/testing/swe_bench_baseline.py", line 172, in <module>
+    instances = load_swe_bench_lite(num_samples=num_problems)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/noahcasarotto-dinning/All of Coding/Giga-Think/testing/swe_bench_baseline.py", line 27, in load_swe_bench_lite
+    dataset = load_dataset("princeton-nlp/SWE-bench_Lite", split="test")
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/noahcasarotto-dinning/Library/Python/3.12/lib/python/site-packages/datasets/load.py", line 2606, in load_dataset
+    builder_instance = load_dataset_builder(
+                       ^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/noahcasarotto-dinning/Library/Python/3.12/lib/python/site-packages/datasets/load.py", line 2314, in load_dataset_builder
+    builder_instance: DatasetBuilder = builder_cls(
+                                       ^^^^^^^^^^^^
+  File "/Users/noahcasarotto-dinning/Library/Python/3.12/lib/python/site-packages/datasets/builder.py", line 447, in __init__
+    extend_dataset_builder_for_streaming(self)
+  File "/Users/noahcasarotto-dinning/Library/Python/3.12/lib/python/site-packages/datasets/streaming.py", line 120, in extend_dataset_builder_for_streaming
+    extend_module_for_streaming(builder.__module__, download_config=download_config)
+  File "/Users/noahcasarotto-dinning/Library/Python/3.12/lib/python/site-packages/datasets/streaming.py", line 103, in extend_module_for_streaming
+    patch_submodule(module, "scipy.io.loadmat", wrap_auth(xsio_loadmat), attrs=["__version__"]).start()
+  File "/Users/noahcasarotto-dinning/Library/Python/3.12/lib/python/site-packages/datasets/utils/patching.py", line 108, in start
+    self.__enter__()
+  File "/Users/noahcasarotto-dinning/Library/Python/3.12/lib/python/site-packages/datasets/utils/patching.py", line 57, in __enter__
+    submodule = import_module(".".join(submodules[: i + 1]))
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/importlib/__init__.py", line 90, in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen importlib._bootstrap>", line 1381, in _gcd_import
+  File "<frozen importlib._bootstrap>", line 1354, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1325, in _find_and_load_unlocked
+  File "<frozen importlib._bootstrap>", line 929, in _load_unlocked
+  File "<frozen importlib._bootstrap_external>", line 994, in exec_module
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "/Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/site-packages/scipy/__init__.py", line 91, in <module>
+    raise ImportError(msg) from e
+ImportError: The `scipy` install you are using seems to be broken, (extension modules cannot be imported), please try reinstalling.

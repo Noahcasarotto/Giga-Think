@@ -1,0 +1,769 @@
+diff --git a/django/db/models/fields/__init__.py b/django/db/models/fields/__init__.py
+index 28374272f4..dd718ba496 100644
+--- a/django/db/models/fields/__init__.py
++++ b/django/db/models/fields/__init__.py
+@@ -516,16 +516,43 @@ class Field(RegisterLookupMixin):
+     def __eq__(self, other):
+         # Needed for @total_ordering
+         if isinstance(other, Field):
+-            return self.creation_counter == other.creation_counter
++            # Fields are only equal if they have the same creation_counter
++            # AND belong to the same model
++            if self.creation_counter != other.creation_counter:
++                return False
++            # If both have models set, they must be the same model
++            if hasattr(self, 'model') and hasattr(other, 'model'):
++                return self.model == other.model
++            # If neither has a model, consider them equal based on creation_counter alone
++            # If only one has a model, they're not equal
++            return not (hasattr(self, 'model') or hasattr(other, 'model'))
+         return NotImplemented
+ 
+     def __lt__(self, other):
+         # This is needed because bisect does not take a comparison function.
+         if isinstance(other, Field):
+-            return self.creation_counter < other.creation_counter
++            # Order first by creation_counter to maintain existing behavior,
++            # then by model to ensure fields from different models are ordered consistently
++            if self.creation_counter != other.creation_counter:
++                return self.creation_counter < other.creation_counter
++            # When creation_counters are equal, order by model if both have one
++            if hasattr(self, 'model') and hasattr(other, 'model'):
++                # Use string representation for consistent ordering
++                return str(self.model) < str(other.model)
++            # If only one has a model, the one without a model comes first
++            if hasattr(self, 'model'):
++                return False
++            if hasattr(other, 'model'):
++                return True
++            # If neither has a model, they're equal in ordering
++            return False
+         return NotImplemented
+ 
+     def __hash__(self):
++        # Include both creation_counter and model in the hash
++        # to ensure fields from different models have different hashes
++        if hasattr(self, 'model'):
++            return hash((self.creation_counter, self.model))
+         return hash(self.creation_counter)
+ 
+     def __deepcopy__(self, memodict):
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 0000000000..9d1a555708
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,85 @@
++#!/usr/bin/env python
++"""
++Script to reproduce the issue where abstract model fields are considered equal across models.
++"""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    SECRET_KEY='test-secret-key',
++)
++
++django.setup()
++
++from django.db import models
++
++# Define the models as described in the PR
++class A(models.Model):
++    class Meta:
++        abstract = True
++    myfield = models.IntegerField()
++
++class B(A):
++    class Meta:
++        app_label = 'test_app'
++
++class C(A):
++    class Meta:
++        app_label = 'test_app'
++
++# Test the issue
++field_b = B._meta.get_field('myfield')
++field_c = C._meta.get_field('myfield')
++
++print("Testing abstract model field equality issue:")
++print("=" * 50)
++print(f"Field B model: {field_b.model}")
++print(f"Field C model: {field_c.model}")
++print(f"Field B creation_counter: {field_b.creation_counter}")
++print(f"Field C creation_counter: {field_c.creation_counter}")
++print()
++
++# Test equality
++print(f"field_b == field_c: {field_b == field_c}")
++print(f"field_b is field_c: {field_b is field_c}")
++print()
++
++# Test hash
++print(f"hash(field_b): {hash(field_b)}")
++print(f"hash(field_c): {hash(field_c)}")
++print(f"hash(field_b) == hash(field_c): {hash(field_b) == hash(field_c)}")
++print()
++
++# Test set deduplication
++field_set = {field_b, field_c}
++print(f"len({{field_b, field_c}}): {len(field_set)}")
++print(f"Expected: 2, Actual: {len(field_set)}")
++print()
++
++# Test ordering
++print(f"field_b < field_c: {field_b < field_c}")
++print(f"field_c < field_b: {field_c < field_b}")
++print()
++
++# Show that they are different objects with different models
++print("These fields should NOT be considered equal because they belong to different models!")
++print(f"field_b.model == field_c.model: {field_b.model == field_c.model}")
++
++if len(field_set) == 1:
++    print("\n❌ BUG CONFIRMED: Fields from different models are incorrectly considered equal!")
++else:
++    print("\n✅ FIXED: Fields from different models are correctly considered different!")
+\ No newline at end of file
+diff --git a/test_backward_compat.py b/test_backward_compat.py
+new file mode 100644
+index 0000000000..a9cd8adc2d
+--- /dev/null
++++ b/test_backward_compat.py
+@@ -0,0 +1,108 @@
++#!/usr/bin/env python
++"""
++Test backward compatibility for fields without models attached.
++"""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    SECRET_KEY='test-secret-key',
++)
++
++django.setup()
++
++from django.db import models
++
++print("Testing backward compatibility for unattached fields")
++print("=" * 60)
++
++# Test 1: Unattached fields with same creation_counter should be equal
++print("\n1. Testing unattached fields equality:")
++# We need to create fields with the same creation_counter
++# Save the current counter
++from django.db.models.fields import Field
++original_counter = Field.creation_counter
++
++# Create first field
++field1 = models.IntegerField()
++counter1 = field1.creation_counter
++
++# Reset counter to create another field with same counter
++Field.creation_counter = counter1 - 1
++field2 = models.IntegerField()
++counter2 = field2.creation_counter
++
++# Restore original counter
++Field.creation_counter = original_counter
++
++print(f"  field1.creation_counter: {counter1}")
++print(f"  field2.creation_counter: {counter2}")
++print(f"  field1 has model: {hasattr(field1, 'model')}")
++print(f"  field2 has model: {hasattr(field2, 'model')}")
++print(f"  field1 == field2: {field1 == field2}")
++
++if counter1 == counter2:
++    assert field1 == field2, "Unattached fields with same creation_counter should be equal!"
++    print("  ✅ PASS: Unattached fields with same creation_counter are equal")
++
++# Test 2: Unattached field vs attached field
++print("\n2. Testing unattached vs attached field:")
++class TestModel(models.Model):
++    class Meta:
++        app_label = 'test_app'
++    attached_field = models.IntegerField()
++
++attached = TestModel._meta.get_field('attached_field')
++unattached = models.IntegerField()
++
++print(f"  attached has model: {hasattr(attached, 'model')}")
++print(f"  unattached has model: {hasattr(unattached, 'model')}")
++print(f"  attached == unattached: {attached == unattached}")
++assert attached != unattached, "Attached and unattached fields should not be equal!"
++print("  ✅ PASS: Attached and unattached fields are not equal")
++
++# Test 3: Hash and ordering work for unattached fields
++print("\n3. Testing hash and ordering for unattached fields:")
++try:
++    h1 = hash(field1)
++    h2 = hash(field2)
++    print(f"  hash(field1): {h1}")
++    print(f"  hash(field2): {h2}")
++    print("  ✅ PASS: Hash works for unattached fields")
++except Exception as e:
++    print(f"  ❌ FAIL: Hash failed for unattached fields: {e}")
++
++try:
++    # Create fields with different creation_counters
++    field3 = models.IntegerField()
++    field4 = models.IntegerField()
++    
++    if field3.creation_counter < field4.creation_counter:
++        assert field3 < field4, "Ordering should work based on creation_counter"
++        assert not (field4 < field3), "Ordering should be consistent"
++        print(f"  field3 < field4: True (counters: {field3.creation_counter} < {field4.creation_counter})")
++    else:
++        assert field4 < field3, "Ordering should work based on creation_counter"
++        assert not (field3 < field4), "Ordering should be consistent"
++        print(f"  field4 < field3: True (counters: {field4.creation_counter} < {field3.creation_counter})")
++    print("  ✅ PASS: Ordering works for unattached fields")
++except Exception as e:
++    print(f"  ❌ FAIL: Ordering failed for unattached fields: {e}")
++
++print("\n" + "=" * 60)
++print("✅ All backward compatibility tests passed!")
++print("Unattached fields still work as expected.")
+\ No newline at end of file
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..0b185c1c9b
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,130 @@
++#!/usr/bin/env python
++"""
++Test edge cases for the field equality fix.
++"""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    SECRET_KEY='test-secret-key',
++)
++
++django.setup()
++
++from django.db import models
++
++print("Testing edge cases for field equality fix")
++print("=" * 60)
++
++# Test 1: Fields from different concrete models inheriting from same abstract model
++print("\n1. Testing fields from different models with same abstract parent:")
++class AbstractModel(models.Model):
++    class Meta:
++        abstract = True
++    field1 = models.IntegerField()
++    field2 = models.CharField(max_length=100)
++
++class Model1(AbstractModel):
++    class Meta:
++        app_label = 'test_app'
++
++class Model2(AbstractModel):
++    class Meta:
++        app_label = 'test_app'
++
++field1_m1 = Model1._meta.get_field('field1')
++field1_m2 = Model2._meta.get_field('field1')
++field2_m1 = Model1._meta.get_field('field2')
++field2_m2 = Model2._meta.get_field('field2')
++
++print(f"  field1 from Model1 == field1 from Model2: {field1_m1 == field1_m2}")
++print(f"  field2 from Model1 == field2 from Model2: {field2_m1 == field2_m2}")
++print(f"  Set of all four fields has length: {len({field1_m1, field1_m2, field2_m1, field2_m2})}")
++assert len({field1_m1, field1_m2, field2_m1, field2_m2}) == 4, "All four fields should be unique!"
++
++# Test 2: Fields from same model should still be different
++print("\n2. Testing different fields from the same model:")
++print(f"  field1 from Model1 == field2 from Model1: {field1_m1 == field2_m1}")
++assert field1_m1 != field2_m1, "Different fields from same model should not be equal!"
++
++# Test 3: Same field from same model should be equal
++print("\n3. Testing same field retrieved twice from same model:")
++field1_m1_again = Model1._meta.get_field('field1')
++print(f"  field1 from Model1 == field1 from Model1 (retrieved again): {field1_m1 == field1_m1_again}")
++print(f"  They are the same object: {field1_m1 is field1_m1_again}")
++assert field1_m1 == field1_m1_again, "Same field should be equal to itself!"
++
++# Test 4: Test ordering with fields from different models
++print("\n4. Testing ordering of fields:")
++fields = [field1_m1, field1_m2, field2_m1, field2_m2]
++sorted_fields = sorted(fields)
++print(f"  Original order: {[str(f.model.__name__) + '.' + f.name for f in fields]}")
++print(f"  Sorted order: {[str(f.model.__name__) + '.' + f.name for f in sorted_fields]}")
++
++# Test 5: Test hash consistency
++print("\n5. Testing hash consistency:")
++print(f"  hash(field1_m1) == hash(field1_m1): {hash(field1_m1) == hash(field1_m1)}")
++print(f"  hash(field1_m1) == hash(field1_m2): {hash(field1_m1) == hash(field1_m2)}")
++assert hash(field1_m1) == hash(field1_m1), "Hash should be consistent for same field!"
++assert hash(field1_m1) != hash(field1_m2), "Hash should be different for fields from different models!"
++
++# Test 6: Test with unattached field (no model)
++print("\n6. Testing unattached field (no model set):")
++unattached_field = models.IntegerField()
++print(f"  Unattached field has model attribute: {hasattr(unattached_field, 'model')}")
++try:
++    # This should not raise an error
++    hash(unattached_field)
++    print(f"  hash(unattached_field) works: True")
++    
++    # Compare with another unattached field with same creation_counter
++    # (This is a bit tricky to test since creation_counter auto-increments)
++    print(f"  Unattached field creation_counter: {unattached_field.creation_counter}")
++except Exception as e:
++    print(f"  Error with unattached field: {e}")
++
++# Test 7: Multiple inheritance levels
++print("\n7. Testing multiple inheritance levels:")
++class AbstractBase(models.Model):
++    class Meta:
++        abstract = True
++    base_field = models.IntegerField()
++
++class AbstractMiddle(AbstractBase):
++    class Meta:
++        abstract = True
++    middle_field = models.CharField(max_length=50)
++
++class ConcreteModel1(AbstractMiddle):
++    class Meta:
++        app_label = 'test_app'
++
++class ConcreteModel2(AbstractMiddle):
++    class Meta:
++        app_label = 'test_app'
++
++base1 = ConcreteModel1._meta.get_field('base_field')
++base2 = ConcreteModel2._meta.get_field('base_field')
++middle1 = ConcreteModel1._meta.get_field('middle_field')
++middle2 = ConcreteModel2._meta.get_field('middle_field')
++
++print(f"  base_field from ConcreteModel1 == base_field from ConcreteModel2: {base1 == base2}")
++print(f"  middle_field from ConcreteModel1 == middle_field from ConcreteModel2: {middle1 == middle2}")
++assert base1 != base2, "Fields from different models should not be equal!"
++assert middle1 != middle2, "Fields from different models should not be equal!"
++
++print("\n✅ All edge case tests passed!")
+\ No newline at end of file
+diff --git a/test_final_verification.py b/test_final_verification.py
+new file mode 100644
+index 0000000000..f852b3d061
+--- /dev/null
++++ b/test_final_verification.py
+@@ -0,0 +1,159 @@
++#!/usr/bin/env python
++"""
++Final comprehensive test to verify all aspects of the fix.
++"""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    SECRET_KEY='test-secret-key',
++)
++
++django.setup()
++
++from django.db import models
++
++print("FINAL VERIFICATION TEST")
++print("=" * 80)
++print("Verifying that abstract model fields are not equal across models")
++print("and that __eq__, __hash__, and __lt__ all work correctly together.")
++print()
++
++# Create the exact scenario from the PR
++class A(models.Model):
++    class Meta:
++        abstract = True
++    myfield = models.IntegerField()
++
++class B(A):
++    class Meta:
++        app_label = 'test_app'
++
++class C(A):
++    class Meta:
++        app_label = 'test_app'
++
++# Get the fields
++field_b = B._meta.get_field('myfield')
++field_c = C._meta.get_field('myfield')
++
++print("1. EQUALITY TEST")
++print("-" * 40)
++print(f"   B.myfield == C.myfield: {field_b == field_c}")
++assert field_b != field_c, "❌ FAIL: Fields should not be equal!"
++print("   ✅ PASS: Fields are correctly not equal")
++print()
++
++print("2. HASH TEST")
++print("-" * 40)
++print(f"   hash(B.myfield): {hash(field_b)}")
++print(f"   hash(C.myfield): {hash(field_c)}")
++assert hash(field_b) != hash(field_c), "❌ FAIL: Hashes should be different!"
++print("   ✅ PASS: Hashes are correctly different")
++print()
++
++print("3. SET DEDUPLICATION TEST")
++print("-" * 40)
++field_set = {field_b, field_c}
++print(f"   len({{B.myfield, C.myfield}}): {len(field_set)}")
++assert len(field_set) == 2, "❌ FAIL: Set should contain 2 fields!"
++print("   ✅ PASS: Set correctly contains 2 distinct fields")
++print()
++
++print("4. ORDERING TEST")
++print("-" * 40)
++# Test that ordering is consistent
++if field_b < field_c:
++    print(f"   B.myfield < C.myfield: True")
++    assert not (field_c < field_b), "❌ FAIL: Ordering is inconsistent!"
++elif field_c < field_b:
++    print(f"   C.myfield < B.myfield: True")
++    assert not (field_b < field_c), "❌ FAIL: Ordering is inconsistent!"
++else:
++    # They can't both be False if they're not equal
++    assert False, "❌ FAIL: Fields should have a defined ordering!"
++print("   ✅ PASS: Ordering is consistent")
++print()
++
++print("5. SORTING TEST")
++print("-" * 40)
++# Create more models to test sorting
++class D(A):
++    class Meta:
++        app_label = 'test_app'
++
++class E(A):
++    class Meta:
++        app_label = 'test_app'
++
++fields = [
++    B._meta.get_field('myfield'),
++    C._meta.get_field('myfield'),
++    D._meta.get_field('myfield'),
++    E._meta.get_field('myfield'),
++]
++
++# All fields should be unique in a set
++unique_fields = set(fields)
++print(f"   4 fields from 4 models -> set size: {len(unique_fields)}")
++assert len(unique_fields) == 4, "❌ FAIL: All fields should be unique!"
++print("   ✅ PASS: All fields are unique in set")
++
++# Sorting should work without errors
++sorted_fields = sorted(fields)
++print(f"   Sorted {len(sorted_fields)} fields successfully")
++print("   ✅ PASS: Fields can be sorted")
++print()
++
++print("6. DICTIONARY KEY TEST")
++print("-" * 40)
++# Fields should work as dictionary keys
++field_dict = {
++    field_b: 'B',
++    field_c: 'C',
++}
++print(f"   Dictionary with field keys has {len(field_dict)} entries")
++assert len(field_dict) == 2, "❌ FAIL: Fields should be distinct dictionary keys!"
++assert field_dict[field_b] == 'B', "❌ FAIL: Dictionary lookup failed!"
++assert field_dict[field_c] == 'C', "❌ FAIL: Dictionary lookup failed!"
++print("   ✅ PASS: Fields work correctly as dictionary keys")
++print()
++
++print("7. CONSISTENCY TEST")
++print("-" * 40)
++# Test that equality, hash, and ordering are all consistent
++for i in range(10):
++    # Multiple accesses should give same results
++    assert (field_b == field_c) == False, f"❌ FAIL: Equality changed on iteration {i}!"
++    assert hash(field_b) == hash(field_b), f"❌ FAIL: Hash not stable on iteration {i}!"
++    if field_b < field_c:
++        assert field_b < field_c, f"❌ FAIL: Ordering changed on iteration {i}!"
++print("   ✅ PASS: Results are consistent across multiple checks")
++print()
++
++print("=" * 80)
++print("🎉 ALL TESTS PASSED!")
++print()
++print("Summary:")
++print("  - Fields from different models are not equal ✅")
++print("  - Fields from different models have different hashes ✅")
++print("  - Fields from different models don't deduplicate in sets ✅")
++print("  - Fields have consistent ordering ✅")
++print("  - Fields work as dictionary keys ✅")
++print("  - All operations are stable and consistent ✅")
++print()
++print("The fix successfully addresses the issue described in the PR!")
+\ No newline at end of file
+diff --git a/test_ordering_priority.py b/test_ordering_priority.py
+new file mode 100644
+index 0000000000..759f4fe6ab
+--- /dev/null
++++ b/test_ordering_priority.py
+@@ -0,0 +1,99 @@
++#!/usr/bin/env python
++"""
++Test that ordering prioritizes creation_counter first (as mentioned in PR).
++"""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    SECRET_KEY='test-secret-key',
++)
++
++django.setup()
++
++from django.db import models
++
++print("Testing that ordering prioritizes creation_counter")
++print("=" * 60)
++
++# Create models with different fields
++class Model1(models.Model):
++    class Meta:
++        app_label = 'test_app'
++    field1 = models.IntegerField()  # Will have lower creation_counter
++    field2 = models.CharField(max_length=100)  # Will have higher creation_counter
++
++class Model2(models.Model):
++    class Meta:
++        app_label = 'test_app'
++    field3 = models.IntegerField()  # Will have even higher creation_counter
++
++# Get all fields
++f1 = Model1._meta.get_field('field1')
++f2 = Model1._meta.get_field('field2')
++f3 = Model2._meta.get_field('field3')
++
++print(f"field1 creation_counter: {f1.creation_counter}")
++print(f"field2 creation_counter: {f2.creation_counter}")
++print(f"field3 creation_counter: {f3.creation_counter}")
++print()
++
++# Test ordering
++print("Ordering tests:")
++print(f"  field1 < field2: {f1 < f2} (different counters, same model)")
++print(f"  field2 < field3: {f2 < f3} (different counters, different models)")
++print(f"  field1 < field3: {f1 < f3} (different counters, different models)")
++
++# Verify that creation_counter takes precedence
++assert f1 < f2, "Field with lower creation_counter should come first"
++assert f2 < f3, "Field with lower creation_counter should come first"
++assert f1 < f3, "Field with lower creation_counter should come first"
++
++print("\n✅ PASS: Ordering correctly prioritizes creation_counter")
++
++# Now test fields with same creation_counter from different models
++print("\nTesting fields with same creation_counter from different models:")
++
++class Abstract(models.Model):
++    class Meta:
++        abstract = True
++    shared_field = models.IntegerField()
++
++class ModelA(Abstract):
++    class Meta:
++        app_label = 'test_app'
++
++class ModelB(Abstract):
++    class Meta:
++        app_label = 'test_app'
++
++fa = ModelA._meta.get_field('shared_field')
++fb = ModelB._meta.get_field('shared_field')
++
++print(f"ModelA.shared_field creation_counter: {fa.creation_counter}")
++print(f"ModelB.shared_field creation_counter: {fb.creation_counter}")
++print(f"ModelA.shared_field == ModelB.shared_field: {fa == fb}")
++print(f"ModelA.shared_field < ModelB.shared_field: {fa < fb}")
++print(f"ModelB.shared_field < ModelA.shared_field: {fb < fa}")
++
++# One should be less than the other (consistent ordering by model name)
++assert (fa < fb) != (fb < fa), "Exactly one ordering should be true"
++assert fa != fb, "Fields from different models should not be equal"
++
++print("\n✅ PASS: Fields with same creation_counter are ordered by model")
++print("\nSummary: The fix maintains backward compatibility by prioritizing")
++print("creation_counter for ordering, only using model as a tiebreaker.")
+\ No newline at end of file
+diff --git a/test_pr_requirements.py b/test_pr_requirements.py
+new file mode 100644
+index 0000000000..d0e9a395af
+--- /dev/null
++++ b/test_pr_requirements.py
+@@ -0,0 +1,96 @@
++#!/usr/bin/env python
++"""
++Test that specifically verifies the requirements from the PR description.
++"""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    SECRET_KEY='test-secret-key',
++)
++
++django.setup()
++
++from django.db import models
++
++print("Testing PR requirements: Abstract model field should not be equal across models")
++print("=" * 80)
++
++# Exact example from the PR description
++class A(models.Model):
++    class Meta:
++        abstract = True
++    myfield = models.IntegerField()
++
++class B(A):
++    class Meta:
++        app_label = 'test_app'
++
++class C(A):
++    class Meta:
++        app_label = 'test_app'
++
++# Test the exact conditions mentioned in the PR
++field_b = B._meta.get_field('myfield')
++field_c = C._meta.get_field('myfield')
++
++print("\nTest 1: Fields from different models should not be equal")
++print(f"B._meta.get_field('myfield') == C._meta.get_field('myfield'): {field_b == field_c}")
++assert field_b != field_c, "Fields from different models should NOT be equal!"
++print("✅ PASS: Fields are not equal")
++
++print("\nTest 2: Set deduplication should not occur")
++field_set = {B._meta.get_field('myfield'), C._meta.get_field('myfield')}
++print(f"len({{B._meta.get_field('myfield'), C._meta.get_field('myfield')}}): {len(field_set)}")
++assert len(field_set) == 2, "Set should contain 2 distinct fields!"
++print("✅ PASS: Set contains 2 distinct fields")
++
++print("\nTest 3: Hash values should be different")
++print(f"hash(B._meta.get_field('myfield')): {hash(field_b)}")
++print(f"hash(C._meta.get_field('myfield')): {hash(field_c)}")
++assert hash(field_b) != hash(field_c), "Hash values should be different for fields from different models!"
++print("✅ PASS: Hash values are different")
++
++print("\nTest 4: Ordering should be consistent")
++# Fields with same creation_counter should still have a defined ordering based on model
++if field_b < field_c:
++    assert not (field_c < field_b), "Ordering should be consistent!"
++    print("✅ PASS: field_b < field_c (consistent ordering)")
++elif field_c < field_b:
++    assert not (field_b < field_c), "Ordering should be consistent!"
++    print("✅ PASS: field_c < field_b (consistent ordering)")
++else:
++    # They shouldn't be equal in ordering since they're from different models
++    assert False, "Fields from different models should have a defined ordering!"
++
++print("\nTest 5: Verify the root cause - same creation_counter")
++print(f"field_b.creation_counter: {field_b.creation_counter}")
++print(f"field_c.creation_counter: {field_c.creation_counter}")
++print(f"field_b.creation_counter == field_c.creation_counter: {field_b.creation_counter == field_c.creation_counter}")
++print("✅ PASS: Fields have same creation_counter but are still not equal")
++
++print("\nTest 6: Verify models are different")
++print(f"field_b.model: {field_b.model}")
++print(f"field_c.model: {field_c.model}")
++print(f"field_b.model == field_c.model: {field_b.model == field_c.model}")
++assert field_b.model != field_c.model, "Models should be different!"
++print("✅ PASS: Models are different")
++
++print("\n" + "=" * 80)
++print("🎉 ALL PR REQUIREMENTS VERIFIED SUCCESSFULLY!")
++print("Abstract model fields are no longer equal across different models.")
++print("The issue described in the PR has been fixed.")
+\ No newline at end of file

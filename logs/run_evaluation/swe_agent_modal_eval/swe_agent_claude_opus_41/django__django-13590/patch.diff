@@ -1,0 +1,864 @@
+diff --git a/django/db/models/sql/query.py b/django/db/models/sql/query.py
+index 4648daf395..8f465bea70 100644
+--- a/django/db/models/sql/query.py
++++ b/django/db/models/sql/query.py
+@@ -1077,10 +1077,18 @@ class Query(BaseExpression):
+         elif isinstance(value, (list, tuple)):
+             # The items of the iterable may be expressions and therefore need
+             # to be resolved independently.
+-            return type(value)(
++            resolved_values = [
+                 self.resolve_lookup_value(sub_value, can_reuse, allow_joins)
+                 for sub_value in value
+-            )
++            ]
++            # Check if it's a named tuple by checking if the type is a subclass of tuple
++            # but not tuple itself (named tuples are subclasses of tuple)
++            if type(value) is not tuple and isinstance(value, tuple):
++                # It's a named tuple, use * to expand the list
++                return type(value)(*resolved_values)
++            else:
++                # Regular tuple or list
++                return type(value)(resolved_values)
+         return value
+ 
+     def solve_lookup_type(self, lookup):
+diff --git a/final_comprehensive_test.py b/final_comprehensive_test.py
+new file mode 100644
+index 0000000000..ec50d016dd
+--- /dev/null
++++ b/final_comprehensive_test.py
+@@ -0,0 +1,156 @@
++"""
++Final comprehensive test to ensure the fix works correctly for all scenarios
++"""
++import os
++import sys
++import django
++from collections import namedtuple
++from datetime import date, datetime
++
++# Setup Django
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++# Create a minimal settings file
++with open('/testbed/test_settings.py', 'w') as f:
++    f.write("""
++SECRET_KEY = 'test'
++DEBUG = True
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    }
++}
++INSTALLED_APPS = [
++    'django.contrib.contenttypes',
++    'django.contrib.auth',
++]
++USE_TZ = False
++""")
++
++django.setup()
++
++from django.contrib.auth.models import User
++from django.db.models import Q
++
++print("FINAL COMPREHENSIVE TEST")
++print("=" * 60)
++
++test_count = 0
++passed_count = 0
++
++def test(description, test_func):
++    global test_count, passed_count
++    test_count += 1
++    try:
++        test_func()
++        passed_count += 1
++        print(f"✅ Test {test_count}: {description}")
++        return True
++    except Exception as e:
++        print(f"❌ Test {test_count}: {description}")
++        print(f"   Error: {e}")
++        return False
++
++# Test 1: Original PR issue - named tuple with __range
++DateRange = namedtuple('DateRange', ['near', 'far'])
++def test1():
++    date_range = DateRange(near=date(2020, 1, 1), far=date(2020, 12, 31))
++    users = User.objects.filter(date_joined__range=date_range)
++    str(users.query)  # Force query building
++
++test("Named tuple with __range (original PR issue)", test1)
++
++# Test 2: Regular tuple with __range (backward compatibility)
++def test2():
++    regular_range = (date(2020, 1, 1), date(2020, 12, 31))
++    users = User.objects.filter(date_joined__range=regular_range)
++    str(users.query)
++
++test("Regular tuple with __range", test2)
++
++# Test 3: Named tuple with __in
++Triple = namedtuple('Triple', ['a', 'b', 'c'])
++def test3():
++    triple = Triple(1, 2, 3)
++    users = User.objects.filter(id__in=triple)
++    str(users.query)
++
++test("Named tuple with __in", test3)
++
++# Test 4: Regular list with __in
++def test4():
++    regular_list = [1, 2, 3]
++    users = User.objects.filter(id__in=regular_list)
++    str(users.query)
++
++test("Regular list with __in", test4)
++
++# Test 5: Complex query with Q objects and named tuples
++def test5():
++    date_range = DateRange(near=date(2020, 1, 1), far=date(2020, 12, 31))
++    int_range = DateRange(near=1, far=100)  # Reusing DateRange for simplicity
++    q = Q(date_joined__range=date_range) | Q(id__range=int_range)
++    users = User.objects.filter(q)
++    str(users.query)
++
++test("Q objects with named tuples", test5)
++
++# Test 6: Nested filtering with named tuples
++def test6():
++    date_range = DateRange(near=date(2020, 1, 1), far=date(2020, 12, 31))
++    users = User.objects.filter(date_joined__range=date_range).filter(is_active=True)
++    str(users.query)
++
++test("Chained filters with named tuples", test6)
++
++# Test 7: Named tuple with single element
++Single = namedtuple('Single', ['value'])
++def test7():
++    single = Single(value=1)
++    users = User.objects.filter(id__in=single)
++    str(users.query)
++
++test("Single-element named tuple", test7)
++
++# Test 8: Empty named tuple (edge case)
++Empty = namedtuple('Empty', [])
++def test8():
++    from django.core.exceptions import EmptyResultSet
++    empty = Empty()
++    users = User.objects.filter(id__in=empty)
++    try:
++        str(users.query)
++    except EmptyResultSet:
++        pass  # Expected for empty __in
++
++test("Empty named tuple", test8)
++
++# Test 9: Named tuple with many elements
++Many = namedtuple('Many', ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j'])
++def test9():
++    many = Many(1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
++    users = User.objects.filter(id__in=many)
++    str(users.query)
++
++test("Named tuple with many elements", test9)
++
++# Test 10: Mixed types in named tuple (valid use case)
++Mixed = namedtuple('Mixed', ['start_id', 'end_id'])
++def test10():
++    # Test a valid mixed use case - range of IDs
++    mixed = Mixed(start_id=1, end_id=100)
++    users = User.objects.filter(id__range=mixed)
++    str(users.query)
++
++test("Named tuple with mixed types", test10)
++
++print("\n" + "=" * 60)
++print(f"RESULTS: {passed_count}/{test_count} tests passed")
++
++if passed_count == test_count:
++    print("🎉 ALL TESTS PASSED! The fix is working correctly.")
++    sys.exit(0)
++else:
++    print("⚠️ Some tests failed. Please review the errors above.")
++    sys.exit(1)
+\ No newline at end of file
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 0000000000..442232fdbf
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,62 @@
++"""
++Script to reproduce the named tuple issue with __range filters in Django 3.0
++"""
++import os
++import sys
++import django
++from collections import namedtuple
++from datetime import date
++
++# Setup Django
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++# Create a minimal settings file
++with open('/testbed/test_settings.py', 'w') as f:
++    f.write("""
++SECRET_KEY = 'test'
++DEBUG = True
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    }
++}
++INSTALLED_APPS = [
++    'django.contrib.contenttypes',
++    'django.contrib.auth',
++]
++USE_TZ = False
++""")
++
++django.setup()
++
++from django.db import models
++from django.contrib.auth.models import User
++
++# Create a named tuple for date range
++DateRange = namedtuple('DateRange', ['near', 'far'])
++
++# Test the issue
++try:
++    # Create a date range using named tuple
++    date_range = DateRange(near=date(2020, 1, 1), far=date(2020, 12, 31))
++    
++    # Try to use it in a range query
++    # This should work in Django 2.2 but fail in Django 3.0
++    users = User.objects.filter(date_joined__range=date_range)
++    
++    # Just build the query, don't execute it (to avoid needing actual database)
++    # The error happens during query building, not execution
++    query_str = str(users.query)
++    
++    print("SUCCESS: Named tuple worked with __range filter!")
++    print(f"Query built successfully: {query_str[:100]}...")
++    
++except TypeError as e:
++    if "__new__() missing" in str(e):
++        print(f"ERROR: {e}")
++        print("\nThis confirms the issue described in the PR.")
++        import traceback
++        traceback.print_exc()
++    else:
++        raise
+\ No newline at end of file
+diff --git a/test_backward_compat.py b/test_backward_compat.py
+new file mode 100644
+index 0000000000..684472002a
+--- /dev/null
++++ b/test_backward_compat.py
+@@ -0,0 +1,111 @@
++"""
++Test backward compatibility - ensure regular tuples and lists still work as before
++"""
++import os
++import sys
++import django
++from datetime import date, datetime
++
++# Setup Django
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++# Create a minimal settings file
++with open('/testbed/test_settings.py', 'w') as f:
++    f.write("""
++SECRET_KEY = 'test'
++DEBUG = True
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    }
++}
++INSTALLED_APPS = [
++    'django.contrib.contenttypes',
++    'django.contrib.auth',
++]
++USE_TZ = False
++""")
++
++django.setup()
++
++from django.contrib.auth.models import User
++
++print("Testing backward compatibility with regular tuples and lists...")
++print("=" * 60)
++
++# Test 1: Regular tuple with __range (this should have always worked)
++try:
++    regular_tuple = (date(2020, 1, 1), date(2020, 12, 31))
++    users = User.objects.filter(date_joined__range=regular_tuple)
++    query_str = str(users.query)
++    print("✅ Regular tuple with __range works")
++except Exception as e:
++    print(f"❌ Regular tuple failed: {e}")
++    sys.exit(1)
++
++# Test 2: List with __in (this should have always worked)
++try:
++    regular_list = [1, 2, 3, 4, 5]
++    users = User.objects.filter(id__in=regular_list)
++    query_str = str(users.query)
++    print("✅ Regular list with __in works")
++except Exception as e:
++    print(f"❌ Regular list failed: {e}")
++    sys.exit(1)
++
++# Test 3: Tuple with __in (this should have always worked)
++try:
++    regular_tuple = (1, 2, 3, 4, 5)
++    users = User.objects.filter(id__in=regular_tuple)
++    query_str = str(users.query)
++    print("✅ Regular tuple with __in works")
++except Exception as e:
++    print(f"❌ Regular tuple with __in failed: {e}")
++    sys.exit(1)
++
++# Test 4: Empty tuple (edge case)
++try:
++    from django.core.exceptions import EmptyResultSet
++    empty_tuple = ()
++    users = User.objects.filter(id__in=empty_tuple)
++    try:
++        query_str = str(users.query)
++    except EmptyResultSet:
++        # This is expected behavior for empty __in clauses
++        pass
++    print("✅ Empty tuple works (raises EmptyResultSet as expected)")
++except Exception as e:
++    print(f"❌ Empty tuple failed: {e}")
++    import traceback
++    traceback.print_exc()
++    sys.exit(1)
++
++# Test 5: Empty list (edge case)
++try:
++    from django.core.exceptions import EmptyResultSet
++    empty_list = []
++    users = User.objects.filter(id__in=empty_list)
++    try:
++        query_str = str(users.query)
++    except EmptyResultSet:
++        # This is expected behavior for empty __in clauses
++        pass
++    print("✅ Empty list works (raises EmptyResultSet as expected)")
++except Exception as e:
++    print(f"❌ Empty list failed: {e}")
++    sys.exit(1)
++
++# Test 6: Single element tuple
++try:
++    single_tuple = (1,)
++    users = User.objects.filter(id__in=single_tuple)
++    query_str = str(users.query)
++    print("✅ Single element tuple works")
++except Exception as e:
++    print(f"❌ Single element tuple failed: {e}")
++    sys.exit(1)
++
++print("\n" + "=" * 60)
++print("🎉 All backward compatibility tests passed!")
++print("Regular tuples and lists continue to work as expected.")
+\ No newline at end of file
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..d6a79f89e9
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,150 @@
++"""
++Test edge cases for the named tuple fix
++"""
++import os
++import sys
++import django
++from collections import namedtuple
++from datetime import date, datetime
++
++# Setup Django
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++# Create a minimal settings file
++with open('/testbed/test_settings.py', 'w') as f:
++    f.write("""
++SECRET_KEY = 'test'
++DEBUG = True
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    }
++}
++INSTALLED_APPS = [
++    'django.contrib.contenttypes',
++    'django.contrib.auth',
++]
++USE_TZ = False
++""")
++
++django.setup()
++
++from django.db import models
++from django.contrib.auth.models import User
++
++# Test various types of named tuples and regular tuples
++
++# Test 1: Named tuple with 2 elements (original issue)
++DateRange = namedtuple('DateRange', ['near', 'far'])
++date_range = DateRange(near=date(2020, 1, 1), far=date(2020, 12, 31))
++
++try:
++    users = User.objects.filter(date_joined__range=date_range)
++    query_str = str(users.query)
++    print("✓ Test 1 PASSED: Named tuple with 2 elements works")
++except TypeError as e:
++    print(f"✗ Test 1 FAILED: {e}")
++
++# Test 2: Regular tuple (should still work)
++try:
++    regular_tuple = (date(2020, 1, 1), date(2020, 12, 31))
++    users = User.objects.filter(date_joined__range=regular_tuple)
++    query_str = str(users.query)
++    print("✓ Test 2 PASSED: Regular tuple works")
++except Exception as e:
++    print(f"✗ Test 2 FAILED: {e}")
++
++# Test 3: Named tuple with 3 elements (for __in lookups)
++Triple = namedtuple('Triple', ['a', 'b', 'c'])
++triple = Triple(1, 2, 3)
++
++try:
++    users = User.objects.filter(id__in=triple)
++    query_str = str(users.query)
++    print("✓ Test 3 PASSED: Named tuple with 3 elements works for __in")
++except TypeError as e:
++    print(f"✗ Test 3 FAILED: {e}")
++
++# Test 4: Empty named tuple
++EmptyTuple = namedtuple('EmptyTuple', [])
++empty = EmptyTuple()
++
++try:
++    users = User.objects.filter(id__in=empty)
++    query_str = str(users.query)
++    print("✓ Test 4 PASSED: Empty named tuple works")
++except Exception as e:
++    print(f"✗ Test 4 FAILED: {e}")
++
++# Test 5: Named tuple with single element
++Single = namedtuple('Single', ['value'])
++single = Single(value=1)
++
++try:
++    users = User.objects.filter(id__in=single)
++    query_str = str(users.query)
++    print("✓ Test 5 PASSED: Named tuple with single element works")
++except TypeError as e:
++    print(f"✗ Test 5 FAILED: {e}")
++
++# Test 6: List (should still work as before)
++try:
++    regular_list = [1, 2, 3]
++    users = User.objects.filter(id__in=regular_list)
++    query_str = str(users.query)
++    print("✓ Test 6 PASSED: Regular list works")
++except Exception as e:
++    print(f"✗ Test 6 FAILED: {e}")
++
++# Test 7: Nested named tuple (complex case)
++Inner = namedtuple('Inner', ['x', 'y'])
++Outer = namedtuple('Outer', ['inner1', 'inner2'])
++
++# Note: This test is about whether the named tuple construction works,
++# not whether Django accepts nested structures in queries
++try:
++    from django.db.models.sql.query import Query
++    q = Query(User)
++    
++    # Test with a simple named tuple first
++    simple_tuple = DateRange(1, 2)
++    result = q.resolve_lookup_value(simple_tuple, None, False)
++    assert isinstance(result, DateRange), f"Expected DateRange, got {type(result)}"
++    assert result.near == 1 and result.far == 2
++    print("✓ Test 7 PASSED: resolve_lookup_value preserves named tuple type")
++except Exception as e:
++    print(f"✗ Test 7 FAILED: {e}")
++
++# Test 8: Named tuple with expressions (simulating the real use case)
++from django.db.models import F, Value
++from django.db.models.expressions import Expression
++
++class MockExpression(Expression):
++    """Mock expression for testing"""
++    def __init__(self, value):
++        self.value = value
++        super().__init__()
++    
++    def resolve_expression(self, query, *args, **kwargs):
++        return self.value
++
++try:
++    # Create a named tuple with expressions
++    expr_range = DateRange(
++        near=MockExpression(date(2020, 1, 1)),
++        far=MockExpression(date(2020, 12, 31))
++    )
++    
++    q = Query(User)
++    result = q.resolve_lookup_value(expr_range, None, False)
++    
++    # Check that it's still a DateRange and expressions were resolved
++    assert isinstance(result, DateRange), f"Expected DateRange, got {type(result)}"
++    assert result.near == date(2020, 1, 1)
++    assert result.far == date(2020, 12, 31)
++    print("✓ Test 8 PASSED: Named tuple with expressions works correctly")
++except Exception as e:
++    print(f"✗ Test 8 FAILED: {e}")
++
++print("\nAll edge case tests completed!")
+\ No newline at end of file
+diff --git a/test_empty_namedtuple.py b/test_empty_namedtuple.py
+new file mode 100644
+index 0000000000..4561eadfb5
+--- /dev/null
++++ b/test_empty_namedtuple.py
+@@ -0,0 +1,18 @@
++from collections import namedtuple
++
++# Test empty named tuple behavior
++EmptyTuple = namedtuple('EmptyTuple', [])
++
++# Create an instance
++empty1 = EmptyTuple()
++print(f"empty1: {empty1}")
++
++# Try to create from an empty list - this should work
++empty2 = EmptyTuple(*[])
++print(f"empty2: {empty2}")
++
++# They should be equal
++print(f"empty1 == empty2: {empty1 == empty2}")
++
++# This confirms that our implementation is correct - 
++# EmptyTuple(*[]) works and creates the correct instance
+\ No newline at end of file
+diff --git a/test_empty_tuple_debug.py b/test_empty_tuple_debug.py
+new file mode 100644
+index 0000000000..42038775ad
+--- /dev/null
++++ b/test_empty_tuple_debug.py
+@@ -0,0 +1,17 @@
++"""Debug empty tuple issue"""
++import traceback
++
++try:
++    # Test what happens with empty tuple
++    empty_tuple = ()
++    result = type(empty_tuple)([])
++    print(f"Empty tuple from list works: {result}")
++except Exception as e:
++    print(f"Error creating empty tuple from list: {e}")
++    traceback.print_exc()
++
++# The issue is that tuple([]) works fine, so this isn't our bug
++print("\nActual empty tuple creation:")
++print(f"tuple([]) = {tuple([])}")
++print(f"type(()) = {type(())}")
++print(f"type(())([])) = {type(())([])}")
+\ No newline at end of file
+diff --git a/test_namedtuple_fix.py b/test_namedtuple_fix.py
+new file mode 100644
+index 0000000000..e5355a3a9a
+--- /dev/null
++++ b/test_namedtuple_fix.py
+@@ -0,0 +1,138 @@
++"""
++Comprehensive test for the named tuple fix in resolve_lookup_value
++"""
++import os
++import sys
++import django
++from collections import namedtuple
++from datetime import date
++
++# Setup Django
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++# Create a minimal settings file
++with open('/testbed/test_settings.py', 'w') as f:
++    f.write("""
++SECRET_KEY = 'test'
++DEBUG = True
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    }
++}
++INSTALLED_APPS = [
++    'django.contrib.contenttypes',
++    'django.contrib.auth',
++]
++USE_TZ = False
++""")
++
++django.setup()
++
++from django.db.models.sql.query import Query
++from django.contrib.auth.models import User
++
++def test_resolve_lookup_value():
++    """Test that resolve_lookup_value correctly handles different tuple types"""
++    
++    q = Query(User)
++    
++    # Test 1: Regular tuple
++    regular_tuple = (1, 2, 3)
++    result = q.resolve_lookup_value(regular_tuple, None, False)
++    assert result == (1, 2, 3), f"Regular tuple failed: {result}"
++    assert type(result) is tuple, f"Regular tuple type wrong: {type(result)}"
++    print("✓ Regular tuple preserved correctly")
++    
++    # Test 2: Named tuple with 2 elements
++    DateRange = namedtuple('DateRange', ['near', 'far'])
++    date_range = DateRange(near=date(2020, 1, 1), far=date(2020, 12, 31))
++    result = q.resolve_lookup_value(date_range, None, False)
++    assert isinstance(result, DateRange), f"Named tuple type not preserved: {type(result)}"
++    assert result.near == date(2020, 1, 1), f"Named tuple near value wrong: {result.near}"
++    assert result.far == date(2020, 12, 31), f"Named tuple far value wrong: {result.far}"
++    print("✓ Named tuple with 2 elements preserved correctly")
++    
++    # Test 3: Named tuple with 3 elements
++    Triple = namedtuple('Triple', ['a', 'b', 'c'])
++    triple = Triple(1, 2, 3)
++    result = q.resolve_lookup_value(triple, None, False)
++    assert isinstance(result, Triple), f"Triple named tuple type not preserved: {type(result)}"
++    assert result.a == 1 and result.b == 2 and result.c == 3, f"Triple values wrong: {result}"
++    print("✓ Named tuple with 3 elements preserved correctly")
++    
++    # Test 4: Named tuple with 1 element
++    Single = namedtuple('Single', ['value'])
++    single = Single(value=42)
++    result = q.resolve_lookup_value(single, None, False)
++    assert isinstance(result, Single), f"Single named tuple type not preserved: {type(result)}"
++    assert result.value == 42, f"Single value wrong: {result.value}"
++    print("✓ Named tuple with 1 element preserved correctly")
++    
++    # Test 5: Empty named tuple
++    Empty = namedtuple('Empty', [])
++    empty = Empty()
++    result = q.resolve_lookup_value(empty, None, False)
++    assert isinstance(result, Empty), f"Empty named tuple type not preserved: {type(result)}"
++    print("✓ Empty named tuple preserved correctly")
++    
++    # Test 6: List (should remain a list)
++    regular_list = [1, 2, 3]
++    result = q.resolve_lookup_value(regular_list, None, False)
++    assert result == [1, 2, 3], f"List failed: {result}"
++    assert type(result) is list, f"List type wrong: {type(result)}"
++    print("✓ List preserved correctly")
++    
++    # Test 7: Nested structures (named tuple containing expressions)
++    from django.db.models.expressions import Value
++    
++    expr_range = DateRange(
++        near=Value(date(2020, 1, 1)),
++        far=Value(date(2020, 12, 31))
++    )
++    result = q.resolve_lookup_value(expr_range, None, False)
++    assert isinstance(result, DateRange), f"Named tuple with expressions type not preserved: {type(result)}"
++    # The Values should be resolved to themselves (they don't have resolve_expression in this context)
++    print("✓ Named tuple with expressions preserved correctly")
++    
++    print("\n✅ All resolve_lookup_value tests passed!")
++
++def test_actual_queries():
++    """Test that actual queries work with named tuples"""
++    
++    DateRange = namedtuple('DateRange', ['near', 'far'])
++    
++    # Test with __range
++    date_range = DateRange(near=date(2020, 1, 1), far=date(2020, 12, 31))
++    try:
++        query = User.objects.filter(date_joined__range=date_range)
++        # Just build the query, don't execute
++        str(query.query)
++        print("✓ Named tuple works with __range filter")
++    except TypeError as e:
++        print(f"✗ Named tuple failed with __range filter: {e}")
++        return False
++    
++    # Test with __in
++    Triple = namedtuple('Triple', ['a', 'b', 'c'])
++    triple = Triple(1, 2, 3)
++    try:
++        query = User.objects.filter(id__in=triple)
++        str(query.query)
++        print("✓ Named tuple works with __in filter")
++    except TypeError as e:
++        print(f"✗ Named tuple failed with __in filter: {e}")
++        return False
++    
++    print("\n✅ All query tests passed!")
++    return True
++
++if __name__ == "__main__":
++    print("Testing resolve_lookup_value with various tuple types...")
++    print("=" * 60)
++    test_resolve_lookup_value()
++    print("\nTesting actual Django queries with named tuples...")
++    print("=" * 60)
++    test_actual_queries()
++    print("\n🎉 All tests completed successfully!")
+\ No newline at end of file
+diff --git a/test_pr_scenario.py b/test_pr_scenario.py
+new file mode 100644
+index 0000000000..925d58c1a9
+--- /dev/null
++++ b/test_pr_scenario.py
+@@ -0,0 +1,111 @@
++"""
++Test the exact scenario described in the PR: named tuples with __range filters
++"""
++import os
++import sys
++import django
++from collections import namedtuple
++from datetime import date, datetime
++
++# Setup Django
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++# Create a minimal settings file
++with open('/testbed/test_settings.py', 'w') as f:
++    f.write("""
++SECRET_KEY = 'test'
++DEBUG = True
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    }
++}
++INSTALLED_APPS = [
++    'django.contrib.contenttypes',
++    'django.contrib.auth',
++]
++USE_TZ = False
++""")
++
++django.setup()
++
++from django.contrib.auth.models import User
++from django.db import connection
++from django.db.models import Q
++
++# Create the exact scenario from the PR
++print("Testing the exact scenario from the PR description...")
++print("=" * 60)
++
++# Create a named 2-tuple as described in the PR
++DateRange = namedtuple('DateRange', ['near', 'far'])
++
++# Test with date values
++date_range = DateRange(near=date(2020, 1, 1), far=date(2020, 12, 31))
++
++try:
++    # This is what was failing in Django 3.0 before the fix
++    users = User.objects.filter(date_joined__range=date_range)
++    
++    # Build the query (this is where the error would occur)
++    query_str = str(users.query)
++    
++    print("✅ SUCCESS: Named 2-tuple works as argument to __range!")
++    print(f"Query generated: {query_str[:100]}...")
++    
++except TypeError as e:
++    if "__new__() missing 1 required positional argument: 'far'" in str(e):
++        print("❌ FAILURE: Got the exact error from the PR!")
++        print(f"Error: {e}")
++        sys.exit(1)
++    else:
++        print(f"❌ FAILURE: Got unexpected error: {e}")
++        sys.exit(1)
++
++# Test with datetime values (another common use case)
++print("\nTesting with datetime values...")
++DateTimeRange = namedtuple('DateTimeRange', ['start', 'end'])
++dt_range = DateTimeRange(
++    start=datetime(2020, 1, 1, 0, 0, 0),
++    end=datetime(2020, 12, 31, 23, 59, 59)
++)
++
++try:
++    users = User.objects.filter(last_login__range=dt_range)
++    query_str = str(users.query)
++    print("✅ Named tuple with datetime values works!")
++    
++except TypeError as e:
++    print(f"❌ Failed with datetime: {e}")
++    sys.exit(1)
++
++# Test with integer values
++print("\nTesting with integer values...")
++IntRange = namedtuple('IntRange', ['min', 'max'])
++int_range = IntRange(min=1, max=100)
++
++try:
++    users = User.objects.filter(id__range=int_range)
++    query_str = str(users.query)
++    print("✅ Named tuple with integer values works!")
++    
++except TypeError as e:
++    print(f"❌ Failed with integers: {e}")
++    sys.exit(1)
++
++# Test combining with Q objects (complex queries)
++print("\nTesting with Q objects...")
++try:
++    q = Q(date_joined__range=date_range) | Q(id__range=int_range)
++    users = User.objects.filter(q)
++    query_str = str(users.query)
++    print("✅ Named tuples work with Q objects!")
++    
++except TypeError as e:
++    print(f"❌ Failed with Q objects: {e}")
++    sys.exit(1)
++
++print("\n" + "=" * 60)
++print("🎉 All PR scenario tests passed successfully!")
++print("The fix correctly handles named tuples as arguments to __range filters.")
+\ No newline at end of file
+diff --git a/test_settings.py b/test_settings.py
+new file mode 100644
+index 0000000000..87fb35fba6
+--- /dev/null
++++ b/test_settings.py
+@@ -0,0 +1,14 @@
++
++SECRET_KEY = 'test'
++DEBUG = True
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    }
++}
++INSTALLED_APPS = [
++    'django.contrib.contenttypes',
++    'django.contrib.auth',
++]
++USE_TZ = False

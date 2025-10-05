@@ -1,0 +1,21 @@
+/Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/site-packages/paramiko/pkey.py:100: CryptographyDeprecationWarning: TripleDES has been moved to cryptography.hazmat.decrepit.ciphers.algorithms.TripleDES and will be removed from cryptography.hazmat.primitives.ciphers.algorithms in 48.0.0.
+  "cipher": algorithms.TripleDES,
+/Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/site-packages/paramiko/transport.py:259: CryptographyDeprecationWarning: TripleDES has been moved to cryptography.hazmat.decrepit.ciphers.algorithms.TripleDES and will be removed from cryptography.hazmat.primitives.ciphers.algorithms in 48.0.0.
+  "class": algorithms.TripleDES,
+2025-10-04 16:25:45,678 - datasets - INFO - PyTorch version 2.5.1 available.
+2025-10-04 16:25:45,678 - datasets - INFO - TensorFlow version 2.16.1 available.
+Traceback (most recent call last):
+  File "<frozen runpy>", line 189, in _run_module_as_main
+  File "<frozen runpy>", line 112, in _get_module_details
+  File "/Users/noahcasarotto-dinning/Library/Python/3.12/lib/python/site-packages/swebench/__init__.py", line 7, in <module>
+    from swebench.harness.constants import (
+  File "/Users/noahcasarotto-dinning/Library/Python/3.12/lib/python/site-packages/swebench/harness/__init__.py", line 1, in <module>
+    from swebench.harness import (
+  File "/Users/noahcasarotto-dinning/Library/Python/3.12/lib/python/site-packages/swebench/harness/run_evaluation.py", line 50, in <module>
+    from swebench.harness.modal_eval import (
+  File "/Users/noahcasarotto-dinning/Library/Python/3.12/lib/python/site-packages/swebench/harness/modal_eval/__init__.py", line 1, in <module>
+    from swebench.harness.modal_eval.run_evaluation_modal import run_instances_modal
+  File "/Users/noahcasarotto-dinning/Library/Python/3.12/lib/python/site-packages/swebench/harness/modal_eval/run_evaluation_modal.py", line 225, in <module>
+    image=swebench_image.add_local_file(
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'Image' object has no attribute 'add_local_file'. Did you mean: 'copy_local_file'?

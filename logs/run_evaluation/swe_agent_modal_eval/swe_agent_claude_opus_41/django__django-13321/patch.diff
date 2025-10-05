@@ -1,0 +1,530 @@
+diff --git a/django/contrib/sessions/backends/base.py b/django/contrib/sessions/backends/base.py
+index 187e14b1b7..cbdacd2c16 100644
+--- a/django/contrib/sessions/backends/base.py
++++ b/django/contrib/sessions/backends/base.py
+@@ -132,8 +132,8 @@ class SessionBase:
+ 
+     def _legacy_decode(self, session_data):
+         # RemovedInDjango40Warning: pre-Django 3.1 format will be invalid.
+-        encoded_data = base64.b64decode(session_data.encode('ascii'))
+         try:
++            encoded_data = base64.b64decode(session_data.encode('ascii'))
+             # could produce ValueError if there is no ':'
+             hash, serialized = encoded_data.split(b':', 1)
+             expected_hash = self._hash(serialized)
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 0000000000..72da1b0a02
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,91 @@
++#!/usr/bin/env python
++"""Script to reproduce the session decoding issue."""
++
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test-secret-key',
++    INSTALLED_APPS=[
++        'django.contrib.sessions',
++    ],
++    SESSION_SERIALIZER='django.contrib.sessions.serializers.JSONSerializer',
++    DEFAULT_HASHING_ALGORITHM='sha256',  # Use the new algorithm
++)
++
++django.setup()
++
++from django.contrib.sessions.backends.base import SessionBase
++
++class TestSessionStore(SessionBase):
++    """A minimal session store for testing."""
++    
++    def load(self):
++        return {}
++    
++    def save(self, must_create=False):
++        pass
++    
++    def exists(self, session_key):
++        return False
++    
++    def delete(self, session_key=None):
++        pass
++    
++    def create(self):
++        pass
++
++def test_invalid_session_data():
++    """Test decoding various types of invalid session data."""
++    
++    session = TestSessionStore()
++    
++    # Test cases that should trigger the binascii.Error
++    invalid_session_data_cases = [
++        # Invalid base64 padding
++        "invalid_base64_padding",
++        "abc",
++        "a" * 100,  # Long string without proper base64 encoding
++        "test:data",  # Contains colon but not valid base64
++        "!!!invalid!!!",  # Special characters that aren't valid base64
++    ]
++    
++    print("Testing invalid session data decoding...")
++    for i, invalid_data in enumerate(invalid_session_data_cases, 1):
++        print(f"\nTest case {i}: {invalid_data[:50]}...")
++        try:
++            result = session.decode(invalid_data)
++            print(f"  Result: {result}")
++            if result == {}:
++                print("  ✓ Successfully returned empty dict for invalid data")
++            else:
++                print("  ✗ Unexpected result (should be empty dict)")
++        except Exception as e:
++            print(f"  ✗ ERROR: {type(e).__name__}: {e}")
++            print("  This should have been caught and returned an empty dict!")
++            
++    # Also test with valid legacy format to ensure we don't break it
++    print("\n\nTesting with a valid legacy session (if we can create one)...")
++    try:
++        # Try to create a valid legacy session
++        settings.DEFAULT_HASHING_ALGORITHM = 'sha1'
++        legacy_session = TestSessionStore()
++        test_data = {'key': 'value'}
++        encoded = legacy_session.encode(test_data)
++        print(f"Encoded legacy data: {encoded}")
++        
++        decoded = legacy_session.decode(encoded)
++        print(f"Decoded legacy data: {decoded}")
++        if decoded == test_data:
++            print("  ✓ Legacy format still works correctly")
++        else:
++            print("  ✗ Legacy format decoding failed")
++    except Exception as e:
++        print(f"  Could not test legacy format: {e}")
++
++if __name__ == "__main__":
++    test_invalid_session_data()
+\ No newline at end of file
+diff --git a/test_binascii_error.py b/test_binascii_error.py
+new file mode 100644
+index 0000000000..72c765a762
+--- /dev/null
++++ b/test_binascii_error.py
+@@ -0,0 +1,104 @@
++#!/usr/bin/env python
++"""Test that binascii.Error is properly handled in session decoding."""
++
++import os
++import sys
++import django
++from django.conf import settings
++from django.test import TestCase
++
++# Configure Django settings for testing
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test-secret-key',
++    INSTALLED_APPS=[
++        'django.contrib.sessions',
++    ],
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    SESSION_SERIALIZER='django.contrib.sessions.serializers.JSONSerializer',
++    DEFAULT_HASHING_ALGORITHM='sha256',
++)
++
++django.setup()
++
++from django.contrib.sessions.backends.base import SessionBase
++
++class TestSessionStore(SessionBase):
++    """A minimal session store for testing."""
++    
++    def load(self):
++        return {}
++    
++    def save(self, must_create=False):
++        pass
++    
++    def exists(self, session_key):
++        return False
++    
++    def delete(self, session_key=None):
++        pass
++    
++    def create(self):
++        pass
++
++def test_binascii_error_handling():
++    """Test that binascii.Error is properly caught and handled."""
++    
++    session = TestSessionStore()
++    
++    # These inputs will cause binascii.Error due to incorrect padding
++    invalid_inputs_causing_binascii_error = [
++        "abc",  # Too short, incorrect padding
++        "!!!invalid!!!",  # Invalid base64 characters
++        "test data with spaces",  # Spaces are not valid base64
++        "a=b=c=d=",  # Invalid padding format
++    ]
++    
++    print("Testing binascii.Error handling in session decoding...")
++    all_passed = True
++    
++    for test_input in invalid_inputs_causing_binascii_error:
++        print(f"\nTesting with input: {repr(test_input)}")
++        try:
++            result = session.decode(test_input)
++            if result == {}:
++                print("  ✓ Returned empty dict (expected behavior)")
++            else:
++                print(f"  ✗ Unexpected result: {result}")
++                all_passed = False
++        except Exception as e:
++            print(f"  ✗ FAILED: {type(e).__name__}: {e}")
++            print("     This error should have been caught!")
++            all_passed = False
++    
++    # Also test the _legacy_decode directly
++    print("\n\nTesting _legacy_decode directly with invalid input...")
++    for test_input in invalid_inputs_causing_binascii_error:
++        print(f"\nTesting _legacy_decode with: {repr(test_input)}")
++        try:
++            result = session._legacy_decode(test_input)
++            if result == {}:
++                print("  ✓ Returned empty dict (expected behavior)")
++            else:
++                print(f"  ✗ Unexpected result: {result}")
++                all_passed = False
++        except Exception as e:
++            print(f"  ✗ FAILED: {type(e).__name__}: {e}")
++            print("     _legacy_decode should catch all exceptions!")
++            all_passed = False
++    
++    print("\n" + "="*50)
++    if all_passed:
++        print("✓ All binascii.Error tests passed!")
++        return 0
++    else:
++        print("✗ Some tests failed!")
++        return 1
++
++if __name__ == "__main__":
++    sys.exit(test_binascii_error_handling())
+\ No newline at end of file
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..9ef90f5d74
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,156 @@
++#!/usr/bin/env python
++"""Test edge cases for session decoding."""
++
++import os
++import sys
++import django
++import binascii
++import base64
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test-secret-key',
++    INSTALLED_APPS=[
++        'django.contrib.sessions',
++    ],
++    SESSION_SERIALIZER='django.contrib.sessions.serializers.JSONSerializer',
++    DEFAULT_HASHING_ALGORITHM='sha256',
++)
++
++django.setup()
++
++from django.contrib.sessions.backends.base import SessionBase
++
++class TestSessionStore(SessionBase):
++    """A minimal session store for testing."""
++    
++    def load(self):
++        return {}
++    
++    def save(self, must_create=False):
++        pass
++    
++    def exists(self, session_key):
++        return False
++    
++    def delete(self, session_key=None):
++        pass
++    
++    def create(self):
++        pass
++
++def test_edge_cases():
++    """Test various edge cases for session decoding."""
++    
++    session = TestSessionStore()
++    
++    edge_cases = [
++        # Empty string
++        ("", "Empty string"),
++        
++        # None (should not crash)
++        (None, "None value"),
++        
++        # Valid base64 but no colon separator
++        (base64.b64encode(b"no colon here").decode('ascii'), "Valid base64 but no colon"),
++        
++        # Valid base64 with colon but invalid hash
++        (base64.b64encode(b"invalid_hash:some_data").decode('ascii'), "Valid base64 with invalid hash"),
++        
++        # Unicode characters
++        ("こんにちは", "Unicode characters"),
++        
++        # Very long string
++        ("x" * 10000, "Very long string"),
++        
++        # Special characters
++        ("!@#$%^&*()", "Special characters"),
++        
++        # Newlines and tabs
++        ("test\ndata\ttab", "Newlines and tabs"),
++        
++        # Binary data encoded as string
++        ("\x00\x01\x02\x03", "Binary data as string"),
++        
++        # Valid base64 with correct format but unpickleable data
++        (base64.b64encode(b"hash:unpickleable").decode('ascii'), "Valid format but unpickleable"),
++    ]
++    
++    print("Testing edge cases for session decoding...")
++    all_passed = True
++    
++    for i, (test_data, description) in enumerate(edge_cases, 1):
++        print(f"\nTest case {i}: {description}")
++        if test_data is not None:
++            print(f"  Data: {repr(test_data[:50] if len(str(test_data)) > 50 else test_data)}")
++        else:
++            print(f"  Data: None")
++            
++        try:
++            # Skip None test as decode expects a string
++            if test_data is None:
++                print("  ⚠ Skipping None test (decode expects string)")
++                continue
++                
++            result = session.decode(test_data)
++            if result == {}:
++                print(f"  ✓ Successfully returned empty dict")
++            else:
++                print(f"  ✗ Unexpected result: {result}")
++                all_passed = False
++        except Exception as e:
++            print(f"  ✗ ERROR: {type(e).__name__}: {e}")
++            all_passed = False
++    
++    # Test that valid session data still works
++    print("\n\nTesting valid session data...")
++    try:
++        # Create a valid session using the new format
++        test_data = {'user_id': 123, 'username': 'testuser'}
++        encoded = session.encode(test_data)
++        print(f"Encoded data: {encoded[:50]}...")
++        
++        decoded = session.decode(encoded)
++        print(f"Decoded data: {decoded}")
++        if decoded == test_data:
++            print("  ✓ Valid session data decoded correctly")
++        else:
++            print("  ✗ Valid session data not decoded correctly")
++            all_passed = False
++    except Exception as e:
++        print(f"  ✗ ERROR with valid data: {type(e).__name__}: {e}")
++        all_passed = False
++    
++    # Test legacy format with sha1
++    print("\n\nTesting legacy format...")
++    try:
++        settings.DEFAULT_HASHING_ALGORITHM = 'sha1'
++        legacy_session = TestSessionStore()
++        test_data = {'legacy': True, 'data': 'test'}
++        encoded = legacy_session.encode(test_data)
++        print(f"Encoded legacy data: {encoded[:50]}...")
++        
++        decoded = legacy_session.decode(encoded)
++        print(f"Decoded legacy data: {decoded}")
++        if decoded == test_data:
++            print("  ✓ Legacy format decoded correctly")
++        else:
++            print("  ✗ Legacy format not decoded correctly")
++            all_passed = False
++    except Exception as e:
++        print(f"  ✗ ERROR with legacy format: {type(e).__name__}: {e}")
++        all_passed = False
++    
++    print("\n" + "="*50)
++    if all_passed:
++        print("✓ All tests passed!")
++    else:
++        print("✗ Some tests failed!")
++    
++    return all_passed
++
++if __name__ == "__main__":
++    success = test_edge_cases()
++    sys.exit(0 if success else 1)
+\ No newline at end of file
+diff --git a/test_pr_scenario.py b/test_pr_scenario.py
+new file mode 100644
+index 0000000000..312675eeae
+--- /dev/null
++++ b/test_pr_scenario.py
+@@ -0,0 +1,137 @@
++#!/usr/bin/env python
++"""Test the exact scenario described in the PR."""
++
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings to match a typical production setup
++settings.configure(
++    DEBUG=False,
++    SECRET_KEY='test-secret-key',
++    INSTALLED_APPS=[
++        'django.contrib.sessions',
++        'django.contrib.auth',
++        'django.contrib.contenttypes',
++    ],
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    MIDDLEWARE=[
++        'django.contrib.sessions.middleware.SessionMiddleware',
++        'django.contrib.auth.middleware.AuthenticationMiddleware',
++    ],
++    SESSION_ENGINE='django.contrib.sessions.backends.db',
++    SESSION_SERIALIZER='django.contrib.sessions.serializers.JSONSerializer',
++    DEFAULT_HASHING_ALGORITHM='sha256',
++)
++
++django.setup()
++
++# Create tables
++from django.core.management import call_command
++call_command('migrate', verbosity=0)
++
++from django.contrib.sessions.backends.db import SessionStore
++from django.contrib.sessions.models import Session
++from django.test import RequestFactory
++from django.contrib.auth import get_user
++from django.contrib.auth.models import AnonymousUser
++
++def test_pr_scenario():
++    """Test the exact scenario from the PR where invalid session data causes a crash."""
++    
++    print("Testing PR scenario: Invalid session data causing crash...")
++    print("="*60)
++    
++    # Create a session with invalid data that would cause binascii.Error
++    # This simulates an old/corrupted session in the database
++    invalid_session_data = "invalid_base64_padding"  # This will cause binascii.Error
++    
++    # Directly create a session record with invalid data
++    from django.utils import timezone
++    session = Session.objects.create(
++        session_key='test_invalid_session_key',
++        session_data=invalid_session_data,
++        expire_date=timezone.now() + timezone.timedelta(days=1)
++    )
++    print(f"Created session with invalid data: {invalid_session_data}")
++    
++    # Now try to load this session (simulating what happens when a user visits the site)
++    store = SessionStore(session_key='test_invalid_session_key')
++    
++    print("\nAttempting to load session with invalid data...")
++    try:
++        loaded_data = store.load()
++        print(f"✓ Successfully loaded session data: {loaded_data}")
++        if loaded_data == {}:
++            print("✓ Invalid session data correctly returned as empty dict")
++        else:
++            print("✗ Unexpected data returned")
++            return False
++    except Exception as e:
++        print(f"✗ FAILED: {type(e).__name__}: {e}")
++        print("This is the bug from the PR - invalid session data should not crash!")
++        return False
++    
++    # Test accessing session through request (simulating middleware)
++    print("\nTesting session access through request (simulating middleware)...")
++    factory = RequestFactory()
++    request = factory.get('/')
++    request.session = store
++    
++    try:
++        # This simulates what happens in auth middleware
++        # The traceback in the PR shows this is where it fails
++        session_data = request.session._session
++        print(f"✓ Session data accessed successfully: {session_data}")
++        
++        # Try to get a value from the session
++        test_value = request.session.get('test_key', 'default')
++        print(f"✓ Can get values from session: {test_value}")
++        
++    except Exception as e:
++        print(f"✗ FAILED when accessing session: {type(e).__name__}: {e}")
++        return False
++    
++    # Test with various other invalid formats that could exist in production
++    print("\n" + "="*60)
++    print("Testing other invalid session formats that might exist...")
++    
++    invalid_formats = [
++        ("abc", "Short invalid base64"),
++        ("!!!invalid!!!", "Special characters"),
++        ("test:data", "Contains colon but not valid base64"),
++        ("a" * 1000, "Very long invalid string"),
++    ]
++    
++    for invalid_data, description in invalid_formats:
++        print(f"\nTesting: {description}")
++        # Update the session with new invalid data
++        session.session_data = invalid_data
++        session.save()
++        
++        store = SessionStore(session_key='test_invalid_session_key')
++        try:
++            loaded = store.load()
++            if loaded == {}:
++                print(f"  ✓ Correctly handled: returned empty dict")
++            else:
++                print(f"  ✗ Unexpected result: {loaded}")
++                return False
++        except Exception as e:
++            print(f"  ✗ FAILED: {type(e).__name__}: {e}")
++            return False
++    
++    print("\n" + "="*60)
++    print("✓ All PR scenario tests passed!")
++    print("The fix successfully prevents crashes from invalid session data.")
++    return True
++
++if __name__ == "__main__":
++    success = test_pr_scenario()
++    sys.exit(0 if success else 1)
+\ No newline at end of file

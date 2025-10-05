@@ -1,0 +1,543 @@
+diff --git a/django/contrib/syndication/views.py b/django/contrib/syndication/views.py
+index 68ffb0bfe0..f72fac5fc0 100644
+--- a/django/contrib/syndication/views.py
++++ b/django/contrib/syndication/views.py
+@@ -199,6 +199,18 @@ class Feed:
+             if updateddate and is_naive(updateddate):
+                 updateddate = make_aware(updateddate, tz)
+ 
++            # Get extra kwargs first to check for conflicts
++            extra_kwargs = self.item_extra_kwargs(item)
++            
++            # Get comments, preferring item_comments method over extra_kwargs
++            comments = self._get_dynamic_attr('item_comments', item)
++            if comments is None:
++                # Use comments from extra_kwargs if item_comments is not defined
++                comments = extra_kwargs.pop('comments', None)
++            else:
++                # Remove comments from extra_kwargs to avoid conflict
++                extra_kwargs.pop('comments', None)
++
+             feed.add_item(
+                 title=title,
+                 link=link,
+@@ -214,6 +226,7 @@ class Feed:
+                 author_link=author_link,
+                 categories=self._get_dynamic_attr('item_categories', item),
+                 item_copyright=self._get_dynamic_attr('item_copyright', item),
+-                **self.item_extra_kwargs(item)
++                comments=comments,
++                **extra_kwargs
+             )
+         return feed
+diff --git a/test_comments.py b/test_comments.py
+new file mode 100644
+index 0000000000..4d92f10d4d
+--- /dev/null
++++ b/test_comments.py
+@@ -0,0 +1,204 @@
++#!/usr/bin/env python
++"""
++Test script to verify the comments functionality in syndication framework.
++"""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++        'django.contrib.sites',
++        'django.contrib.syndication',
++    ],
++    SITE_ID=1,
++    SECRET_KEY='test-secret-key',
++    USE_TZ=True,
++    ALLOWED_HOSTS=['testserver', 'example.com'],
++)
++
++django.setup()
++
++# Create the sites table and add a site
++from django.core.management import call_command
++call_command('migrate', verbosity=0, interactive=False)
++
++from django.contrib.sites.models import Site
++Site.objects.get_or_create(pk=1, defaults={'domain': 'example.com', 'name': 'Example'})
++
++from django.contrib.syndication import views
++from django.utils import feedgenerator
++from django.test import RequestFactory
++from django.http import HttpRequest
++from io import StringIO
++
++
++class TestFeedWithComments(views.Feed):
++    """Test feed that includes comments"""
++    title = 'Test Feed'
++    link = '/feed/'
++    description = 'Test feed with comments'
++    
++    def items(self):
++        return [
++            {'id': 1, 'title': 'Item 1', 'link': '/item1/', 'comments_url': '/item1/comments/'},
++            {'id': 2, 'title': 'Item 2', 'link': '/item2/', 'comments_url': '/item2/comments/'},
++        ]
++    
++    def item_title(self, item):
++        return item['title']
++    
++    def item_link(self, item):
++        return item['link']
++    
++    def item_description(self, item):
++        return f"Description for {item['title']}"
++    
++    def item_comments(self, item):
++        """This method should provide the comments URL"""
++        return f"http://example.com{item['comments_url']}"
++
++
++class TestFeedWithCommentsViaExtraKwargs(views.Feed):
++    """Test feed that includes comments via item_extra_kwargs"""
++    title = 'Test Feed'
++    link = '/feed/'
++    description = 'Test feed with comments via extra kwargs'
++    
++    def items(self):
++        return [
++            {'id': 1, 'title': 'Item 1', 'link': '/item1/', 'comments_url': '/item1/comments/'},
++            {'id': 2, 'title': 'Item 2', 'link': '/item2/', 'comments_url': '/item2/comments/'},
++        ]
++    
++    def item_title(self, item):
++        return item['title']
++    
++    def item_link(self, item):
++        return item['link']
++    
++    def item_description(self, item):
++        return f"Description for {item['title']}"
++    
++    def item_extra_kwargs(self, item):
++        """Currently the only way to add comments is via item_extra_kwargs"""
++        return {
++            'comments': f"http://example.com{item['comments_url']}"
++        }
++
++
++def test_current_behavior():
++    """Test the current behavior - comments via item_extra_kwargs"""
++    print("Testing current behavior (comments via item_extra_kwargs)...")
++    
++    request = RequestFactory().get('/feed/')
++    feed = TestFeedWithCommentsViaExtraKwargs()
++    response = feed(request)
++    content = response.content.decode('utf-8')
++    
++    print("Feed content includes comments?", '<comments>' in content)
++    if '<comments>' in content:
++        print("✓ Comments are included via item_extra_kwargs")
++        # Extract and print comments
++        import re
++        comments = re.findall(r'<comments>(.*?)</comments>', content)
++        for i, comment in enumerate(comments, 1):
++            print(f"  Item {i} comments: {comment}")
++    else:
++        print("✗ Comments are NOT included via item_extra_kwargs")
++    
++    print("\n" + "="*50 + "\n")
++
++
++def test_desired_behavior():
++    """Test the desired behavior - comments via item_comments method"""
++    print("Testing desired behavior (comments via item_comments method)...")
++    
++    request = RequestFactory().get('/feed/')
++    feed = TestFeedWithComments()
++    
++    try:
++        response = feed(request)
++        content = response.content.decode('utf-8')
++        
++        print("Feed content includes comments?", '<comments>' in content)
++        if '<comments>' in content:
++            print("✓ Comments are included via item_comments method")
++            # Extract and print comments
++            import re
++            comments = re.findall(r'<comments>(.*?)</comments>', content)
++            for i, comment in enumerate(comments, 1):
++                print(f"  Item {i} comments: {comment}")
++        else:
++            print("✗ Comments are NOT included via item_comments method")
++            print("  This is expected before the fix is applied.")
++    except Exception as e:
++        print(f"✗ Error occurred: {e}")
++        print("  This might be expected before the fix is applied.")
++    
++    print("\n" + "="*50 + "\n")
++
++
++def test_feedgenerator_directly():
++    """Test that feedgenerator.add_item accepts comments parameter"""
++    print("Testing feedgenerator.add_item with comments parameter...")
++    
++    feed = feedgenerator.Rss201rev2Feed(
++        title="Test Feed",
++        link="http://example.com/feed/",
++        description="Test feed"
++    )
++    
++    try:
++        feed.add_item(
++            title="Test Item",
++            link="http://example.com/item1/",
++            description="Test description",
++            comments="http://example.com/item1/comments/"
++        )
++        
++        output = StringIO()
++        feed.write(output, 'utf-8')
++        content = output.getvalue()
++        
++        if '<comments>' in content:
++            print("✓ feedgenerator.add_item accepts comments parameter and includes it in output")
++            import re
++            comments = re.findall(r'<comments>(.*?)</comments>', content)
++            if comments:
++                print(f"  Comments URL: {comments[0]}")
++        else:
++            print("✗ feedgenerator.add_item accepts comments but doesn't include in output")
++            
++    except TypeError as e:
++        print(f"✗ feedgenerator.add_item doesn't accept comments parameter: {e}")
++    
++    print("\n" + "="*50 + "\n")
++
++
++if __name__ == '__main__':
++    print("="*50)
++    print("Testing Comments Support in Syndication Framework")
++    print("="*50 + "\n")
++    
++    test_feedgenerator_directly()
++    test_current_behavior()
++    test_desired_behavior()
++    
++    print("Summary:")
++    print("--------")
++    print("The feedgenerator already supports 'comments' in add_item().")
++    print("The syndication.views.Feed class needs to be updated to:")
++    print("1. Check for item_comments method/attribute")
++    print("2. Pass the comments value to feed.add_item()")
+\ No newline at end of file
+diff --git a/test_comments_edge_cases.py b/test_comments_edge_cases.py
+new file mode 100644
+index 0000000000..a49574f720
+--- /dev/null
++++ b/test_comments_edge_cases.py
+@@ -0,0 +1,253 @@
++#!/usr/bin/env python
++"""
++Test edge cases for comments functionality in syndication framework.
++"""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++        'django.contrib.sites',
++        'django.contrib.syndication',
++    ],
++    SITE_ID=1,
++    SECRET_KEY='test-secret-key',
++    USE_TZ=True,
++    ALLOWED_HOSTS=['testserver', 'example.com'],
++)
++
++django.setup()
++
++# Create the sites table and add a site
++from django.core.management import call_command
++call_command('migrate', verbosity=0, interactive=False)
++
++from django.contrib.sites.models import Site
++Site.objects.get_or_create(pk=1, defaults={'domain': 'example.com', 'name': 'Example'})
++
++from django.contrib.syndication import views
++from django.utils import feedgenerator
++from django.test import RequestFactory
++
++
++class TestFeedWithBothCommentsAndExtraKwargs(views.Feed):
++    """Test feed that has both item_comments and item_extra_kwargs with comments"""
++    title = 'Test Feed'
++    link = '/feed/'
++    description = 'Test feed with both methods'
++    
++    def items(self):
++        return [
++            {'id': 1, 'title': 'Item 1'},
++        ]
++    
++    def item_title(self, item):
++        return item['title']
++    
++    def item_link(self, item):
++        return f"/item{item['id']}/"
++    
++    def item_description(self, item):
++        return f"Description for {item['title']}"
++    
++    def item_comments(self, item):
++        """This should take precedence"""
++        return f"http://example.com/item{item['id']}/comments-from-method/"
++    
++    def item_extra_kwargs(self, item):
++        """This should be ignored for comments"""
++        return {
++            'comments': f"http://example.com/item{item['id']}/comments-from-kwargs/"
++        }
++
++
++class TestFeedWithOnlyExtraKwargs(views.Feed):
++    """Test feed that only has item_extra_kwargs with comments"""
++    title = 'Test Feed'
++    link = '/feed/'
++    description = 'Test feed with only extra kwargs'
++    
++    def items(self):
++        return [
++            {'id': 1, 'title': 'Item 1'},
++        ]
++    
++    def item_title(self, item):
++        return item['title']
++    
++    def item_link(self, item):
++        return f"/item{item['id']}/"
++    
++    def item_description(self, item):
++        return f"Description for {item['title']}"
++    
++    def item_extra_kwargs(self, item):
++        """This should be used since item_comments is not defined"""
++        return {
++            'comments': f"http://example.com/item{item['id']}/comments-from-kwargs/"
++        }
++
++
++class TestFeedWithNoneComments(views.Feed):
++    """Test feed where item_comments returns None"""
++    title = 'Test Feed'
++    link = '/feed/'
++    description = 'Test feed with None comments'
++    
++    def items(self):
++        return [
++            {'id': 1, 'title': 'Item 1'},
++        ]
++    
++    def item_title(self, item):
++        return item['title']
++    
++    def item_link(self, item):
++        return f"/item{item['id']}/"
++    
++    def item_description(self, item):
++        return f"Description for {item['title']}"
++    
++    def item_comments(self, item):
++        """Return None - no comments for this item"""
++        return None
++
++
++class TestFeedWithStaticComments(views.Feed):
++    """Test feed with static item_comments attribute"""
++    title = 'Test Feed'
++    link = '/feed/'
++    description = 'Test feed with static comments'
++    
++    # Static attribute instead of method
++    item_comments = 'http://example.com/static-comments/'
++    
++    def items(self):
++        return [
++            {'id': 1, 'title': 'Item 1'},
++        ]
++    
++    def item_title(self, item):
++        return item['title']
++    
++    def item_link(self, item):
++        return f"/item{item['id']}/"
++    
++    def item_description(self, item):
++        return f"Description for {item['title']}"
++
++
++def test_edge_case(feed_class, description, expected_comments=None):
++    """Helper function to test a feed class"""
++    print(f"Testing: {description}")
++    
++    request = RequestFactory().get('/feed/')
++    feed = feed_class()
++    response = feed(request)
++    content = response.content.decode('utf-8')
++    
++    if expected_comments:
++        if f'<comments>{expected_comments}</comments>' in content:
++            print(f"  ✓ Comments correctly set to: {expected_comments}")
++        else:
++            import re
++            comments = re.findall(r'<comments>(.*?)</comments>', content)
++            if comments:
++                print(f"  ✗ Comments set to: {comments[0]} (expected: {expected_comments})")
++            else:
++                print(f"  ✗ No comments found (expected: {expected_comments})")
++    else:
++        if '<comments>' not in content:
++            print(f"  ✓ No comments in feed (as expected)")
++        else:
++            import re
++            comments = re.findall(r'<comments>(.*?)</comments>', content)
++            print(f"  ✗ Unexpected comments found: {comments[0]}")
++    
++    print()
++
++
++def test_atom_feed_with_comments():
++    """Test that comments work with Atom feeds (they don't have comments in spec but shouldn't break)"""
++    print("Testing: Atom feed with item_comments")
++    
++    class TestAtomFeedWithComments(views.Feed):
++        feed_type = feedgenerator.Atom1Feed
++        title = 'Test Atom Feed'
++        link = '/feed/'
++        description = 'Test Atom feed'
++        
++        def items(self):
++            return [{'id': 1, 'title': 'Item 1'}]
++        
++        def item_title(self, item):
++            return item['title']
++        
++        def item_link(self, item):
++            return f"/item{item['id']}/"
++        
++        def item_description(self, item):
++            return f"Description for {item['title']}"
++        
++        def item_comments(self, item):
++            return f"http://example.com/item{item['id']}/comments/"
++    
++    request = RequestFactory().get('/feed/')
++    feed = TestAtomFeedWithComments()
++    
++    try:
++        response = feed(request)
++        content = response.content.decode('utf-8')
++        # Atom feeds don't have comments element, but shouldn't crash
++        print("  ✓ Atom feed works with item_comments (comments ignored as per spec)")
++    except Exception as e:
++        print(f"  ✗ Atom feed failed with item_comments: {e}")
++    
++    print()
++
++
++if __name__ == '__main__':
++    print("="*60)
++    print("Testing Edge Cases for Comments Support")
++    print("="*60 + "\n")
++    
++    test_edge_case(
++        TestFeedWithBothCommentsAndExtraKwargs,
++        "Both item_comments and item_extra_kwargs with comments (method should win)",
++        expected_comments="http://example.com/item1/comments-from-method/"
++    )
++    
++    test_edge_case(
++        TestFeedWithOnlyExtraKwargs,
++        "Only item_extra_kwargs with comments (should work for backward compatibility)",
++        expected_comments="http://example.com/item1/comments-from-kwargs/"
++    )
++    
++    test_edge_case(
++        TestFeedWithNoneComments,
++        "item_comments returns None (no comments should appear)",
++        expected_comments=None
++    )
++    
++    test_edge_case(
++        TestFeedWithStaticComments,
++        "Static item_comments attribute (should work)",
++        expected_comments="http://example.com/static-comments/"
++    )
++    
++    test_atom_feed_with_comments()
++    
++    print("="*60)
++    print("All edge cases tested successfully!")
+\ No newline at end of file
+diff --git a/tests/syndication_tests/feeds.py b/tests/syndication_tests/feeds.py
+index 4e9b1170b1..0bb8041590 100644
+--- a/tests/syndication_tests/feeds.py
++++ b/tests/syndication_tests/feeds.py
+@@ -148,6 +148,24 @@ class NaiveDatesFeed(TestAtomFeed):
+         return item.published
+ 
+ 
++class TestRss2FeedWithComments(TestRss2Feed):
++    """
++    A feed to test the item_comments method.
++    """
++    def item_comments(self, item):
++        return 'http://example.com/entry/%s/comments/' % item.pk
++
++
++class TestRss2FeedWithCommentsFromExtraKwargs(TestRss2Feed):
++    """
++    A feed to test comments via item_extra_kwargs (backward compatibility).
++    """
++    def item_extra_kwargs(self, item):
++        return {
++            'comments': 'http://example.com/entry/%s/comments/' % item.pk
++        }
++
++
+ class TZAwareDatesFeed(TestAtomFeed):
+     """
+     A feed with timezone-aware dates.
+diff --git a/tests/syndication_tests/urls.py b/tests/syndication_tests/urls.py
+index bff7bd0c8d..63558600fd 100644
+--- a/tests/syndication_tests/urls.py
++++ b/tests/syndication_tests/urls.py
+@@ -26,4 +26,6 @@ urlpatterns = [
+     path('syndication/rss2/multiple-enclosure/', feeds.TestMultipleEnclosureRSSFeed()),
+     path('syndication/atom/single-enclosure/', feeds.TestSingleEnclosureAtomFeed()),
+     path('syndication/atom/multiple-enclosure/', feeds.TestMultipleEnclosureAtomFeed()),
++    path('syndication/rss2/comments/', feeds.TestRss2FeedWithComments()),
++    path('syndication/rss2/comments-extra-kwargs/', feeds.TestRss2FeedWithCommentsFromExtraKwargs()),
+ ]

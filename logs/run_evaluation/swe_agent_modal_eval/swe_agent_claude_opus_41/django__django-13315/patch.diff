@@ -1,0 +1,380 @@
+diff --git a/django/forms/models.py b/django/forms/models.py
+index 5d115458a1..f3f784f278 100644
+--- a/django/forms/models.py
++++ b/django/forms/models.py
+@@ -101,6 +101,11 @@ def apply_limit_choices_to_to_formfield(formfield):
+         limit_choices_to = formfield.get_limit_choices_to()
+         if limit_choices_to is not None:
+             formfield.queryset = formfield.queryset.complex_filter(limit_choices_to)
++            # If limit_choices_to is a Q object, ensure distinct results to avoid
++            # duplicates when joins are involved
++            from django.db.models import Q
++            if isinstance(limit_choices_to, Q):
++                formfield.queryset = formfield.queryset.distinct()
+ 
+ 
+ def fields_for_model(model, fields=None, exclude=None, widgets=None,
+diff --git a/test_comprehensive.py b/test_comprehensive.py
+new file mode 100644
+index 0000000000..6835f0fadb
+--- /dev/null
++++ b/test_comprehensive.py
+@@ -0,0 +1,166 @@
++"""
++Comprehensive test for the limit_choices_to duplicate fix
++"""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    SECRET_KEY='test-secret-key',
++)
++
++django.setup()
++
++from django.db import models
++from django.db.models import Q
++from django import forms
++
++# Create test models
++class Tag(models.Model):
++    name = models.CharField(max_length=50)
++    
++    def __str__(self):
++        return self.name
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++class Article(models.Model):
++    title = models.CharField(max_length=100)
++    tags = models.ManyToManyField(Tag)
++    
++    def __str__(self):
++        return self.title
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++class Comment(models.Model):
++    # Test with Q object that causes joins
++    article_q = models.ForeignKey(
++        Article,
++        on_delete=models.CASCADE,
++        limit_choices_to=Q(tags__name__in=['python', 'django']),
++        related_name='comments_q'
++    )
++    
++    # Test with dict (should not add distinct)
++    article_dict = models.ForeignKey(
++        Article,
++        on_delete=models.CASCADE,
++        limit_choices_to={'title__icontains': 'Article'},
++        related_name='comments_dict'
++    )
++    
++    # Test with callable returning Q object
++    article_callable = models.ForeignKey(
++        Article,
++        on_delete=models.CASCADE,
++        limit_choices_to=lambda: Q(tags__name='python'),
++        related_name='comments_callable'
++    )
++    
++    text = models.TextField()
++    
++    def __str__(self):
++        return f"Comment"
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++# Create the tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Tag)
++    schema_editor.create_model(Article)
++    schema_editor.create_model(Comment)
++
++# Create test data
++tag1 = Tag.objects.create(name='python')
++tag2 = Tag.objects.create(name='django')
++tag3 = Tag.objects.create(name='javascript')
++
++article1 = Article.objects.create(title='Article 1')
++article1.tags.add(tag1, tag2)  # This article has both python and django tags
++
++article2 = Article.objects.create(title='Article 2')
++article2.tags.add(tag1)  # This article has only python tag
++
++article3 = Article.objects.create(title='Article 3')
++article3.tags.add(tag3)  # This article has only javascript tag
++
++article4 = Article.objects.create(title='Other')
++article4.tags.add(tag1)  # This article has python tag but different title
++
++# Create ModelForms
++class CommentForm(forms.ModelForm):
++    class Meta:
++        model = Comment
++        fields = ['article_q', 'article_dict', 'article_callable', 'text']
++
++def test_field(field_name, field):
++    print(f"\nTesting field: {field_name}")
++    print("=" * 50)
++    
++    queryset = field.queryset
++    print(f"SQL: {queryset.query}")
++    
++    articles_list = list(queryset)
++    article_ids = [a.id for a in articles_list]
++    unique_ids = set(article_ids)
++    
++    if len(article_ids) != len(unique_ids):
++        print(f"❌ DUPLICATE ARTICLES FOUND!")
++        print(f"Total: {len(article_ids)}, Unique: {len(unique_ids)}")
++        from collections import Counter
++        counts = Counter(article_ids)
++        for article_id, count in counts.items():
++            if count > 1:
++                article = Article.objects.get(id=article_id)
++                print(f"  - Article '{article.title}' (ID: {article_id}) appears {count} times")
++        return False
++    else:
++        print(f"✓ No duplicates found")
++        print(f"Articles found: {[str(a) for a in articles_list]}")
++        return True
++
++# Test the form fields
++print("Testing limit_choices_to with different configurations")
++print("=" * 60)
++
++form = CommentForm()
++all_passed = True
++
++# Test Q object field (should have DISTINCT)
++if not test_field('article_q', form.fields['article_q']):
++    all_passed = False
++
++# Test dict field (should work without DISTINCT)
++if not test_field('article_dict', form.fields['article_dict']):
++    all_passed = False
++
++# Test callable field returning Q object (should have DISTINCT)
++if not test_field('article_callable', form.fields['article_callable']):
++    all_passed = False
++
++print("\n" + "=" * 60)
++if all_passed:
++    print("✅ All tests passed!")
++else:
++    print("❌ Some tests failed!")
+\ No newline at end of file
+diff --git a/test_duplicate_options.py b/test_duplicate_options.py
+new file mode 100644
+index 0000000000..634ac13b7e
+--- /dev/null
++++ b/test_duplicate_options.py
+@@ -0,0 +1,138 @@
++"""
++Test script to reproduce the duplicate options issue with limit_choices_to
++when using Q objects with joins.
++"""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    SECRET_KEY='test-secret-key',
++)
++
++django.setup()
++
++from django.db import models
++from django.db.models import Q
++from django import forms
++from django.contrib.auth.models import User
++
++# Create test models
++class Tag(models.Model):
++    name = models.CharField(max_length=50)
++    
++    def __str__(self):
++        return self.name
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++class Article(models.Model):
++    title = models.CharField(max_length=100)
++    tags = models.ManyToManyField(Tag)
++    
++    def __str__(self):
++        return self.title
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++class Comment(models.Model):
++    article = models.ForeignKey(
++        Article,
++        on_delete=models.CASCADE,
++        # This Q object with a join can cause duplicates
++        limit_choices_to=Q(tags__name__in=['python', 'django'])
++    )
++    text = models.TextField()
++    
++    def __str__(self):
++        return f"Comment on {self.article}"
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++# Create the tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Tag)
++    schema_editor.create_model(Article)
++    schema_editor.create_model(Comment)
++
++# Create test data
++tag1 = Tag.objects.create(name='python')
++tag2 = Tag.objects.create(name='django')
++tag3 = Tag.objects.create(name='javascript')
++
++article1 = Article.objects.create(title='Article 1')
++article1.tags.add(tag1, tag2)  # This article has both python and django tags
++
++article2 = Article.objects.create(title='Article 2')
++article2.tags.add(tag1)  # This article has only python tag
++
++article3 = Article.objects.create(title='Article 3')
++article3.tags.add(tag3)  # This article has only javascript tag
++
++# Create a ModelForm for Comment
++class CommentForm(forms.ModelForm):
++    class Meta:
++        model = Comment
++        fields = ['article', 'text']
++
++# Test the form field
++form = CommentForm()
++article_field = form.fields['article']
++
++print("Testing limit_choices_to with Q object involving joins...")
++print("=" * 60)
++
++# Get the queryset from the field
++queryset = article_field.queryset
++print(f"Queryset SQL: {queryset.query}")
++print(f"Number of articles in queryset: {queryset.count()}")
++
++# Get the actual list of articles
++articles_list = list(queryset)
++print(f"Articles in queryset: {articles_list}")
++
++# Check for duplicates
++article_ids = [a.id for a in articles_list]
++unique_ids = set(article_ids)
++
++if len(article_ids) != len(unique_ids):
++    print(f"\n❌ DUPLICATE ARTICLES FOUND!")
++    print(f"Total articles: {len(article_ids)}")
++    print(f"Unique articles: {len(unique_ids)}")
++    print(f"Article IDs: {article_ids}")
++    
++    # Count occurrences
++    from collections import Counter
++    counts = Counter(article_ids)
++    for article_id, count in counts.items():
++        if count > 1:
++            article = Article.objects.get(id=article_id)
++            print(f"  - Article '{article.title}' (ID: {article_id}) appears {count} times")
++else:
++    print(f"\n✓ No duplicates found")
++    print(f"Unique articles: {len(unique_ids)}")
++
++# Also test the choices directly
++print("\nForm field choices:")
++for choice in article_field.choices:
++    print(f"  {choice}")
+\ No newline at end of file
+diff --git a/test_q_detection.py b/test_q_detection.py
+new file mode 100644
+index 0000000000..b81975efc9
+--- /dev/null
++++ b/test_q_detection.py
+@@ -0,0 +1,39 @@
++"""
++Test to understand how to detect if a Q object involves joins
++"""
++from django.db.models import Q
++from django.db.models.constants import LOOKUP_SEP
++
++def q_involves_joins(q_obj):
++    """Check if a Q object involves joins (contains __ in field lookups)"""
++    if hasattr(q_obj, 'children'):
++        for child in q_obj.children:
++            if isinstance(child, tuple) and len(child) == 2:
++                # Check if the lookup key contains LOOKUP_SEP (__)
++                lookup_key = child[0]
++                if LOOKUP_SEP in lookup_key:
++                    # Check if it's not just a field lookup like __icontains
++                    parts = lookup_key.split(LOOKUP_SEP)
++                    # If the first part is not empty, it's a join
++                    if parts[0]:
++                        return True
++            elif isinstance(child, Q):
++                # Recursively check nested Q objects
++                if q_involves_joins(child):
++                    return True
++    return False
++
++# Test cases
++q1 = Q(name='test')  # No join
++q2 = Q(tags__name='python')  # Has join
++q3 = Q(tags__name__in=['python', 'django'])  # Has join
++q4 = Q(name__icontains='test')  # No join (just a lookup)
++q5 = Q(name='test') | Q(tags__name='python')  # Mixed
++q6 = Q(article__tags__name='python')  # Multiple joins
++
++print(f"Q(name='test'): {q_involves_joins(q1)}")
++print(f"Q(tags__name='python'): {q_involves_joins(q2)}")
++print(f"Q(tags__name__in=['python', 'django']): {q_involves_joins(q3)}")
++print(f"Q(name__icontains='test'): {q_involves_joins(q4)}")
++print(f"Q(name='test') | Q(tags__name='python'): {q_involves_joins(q5)}")
++print(f"Q(article__tags__name='python'): {q_involves_joins(q6)}")
+\ No newline at end of file

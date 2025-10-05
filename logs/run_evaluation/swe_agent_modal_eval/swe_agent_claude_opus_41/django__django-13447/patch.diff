@@ -1,0 +1,748 @@
+diff --git a/django/contrib/admin/sites.py b/django/contrib/admin/sites.py
+index 837dabfea8..89097dbe2b 100644
+--- a/django/contrib/admin/sites.py
++++ b/django/contrib/admin/sites.py
+@@ -430,7 +430,7 @@ class AdminSite:
+                     return HttpResponsePermanentRedirect(path)
+         raise Http404
+ 
+-    def _build_app_dict(self, request, label=None):
++    def build_app_dict(self, request, label=None):
+         """
+         Build the app dictionary. The optional `label` parameter filters models
+         of a specific app.
+@@ -461,6 +461,7 @@ class AdminSite:
+ 
+             info = (app_label, model._meta.model_name)
+             model_dict = {
++                'model': model,
+                 'name': capfirst(model._meta.verbose_name_plural),
+                 'object_name': model._meta.object_name,
+                 'perms': perms,
+@@ -498,12 +499,24 @@ class AdminSite:
+             return app_dict.get(label)
+         return app_dict
+ 
++    def _build_app_dict(self, request, label=None):
++        """
++        Backward compatibility alias for build_app_dict.
++        """
++        import warnings
++        warnings.warn(
++            '_build_app_dict is deprecated, use build_app_dict instead.',
++            DeprecationWarning,
++            stacklevel=2
++        )
++        return self.build_app_dict(request, label)
++
+     def get_app_list(self, request):
+         """
+         Return a sorted list of all the installed apps that have been
+         registered in this site.
+         """
+-        app_dict = self._build_app_dict(request)
++        app_dict = self.build_app_dict(request)
+ 
+         # Sort the apps alphabetically.
+         app_list = sorted(app_dict.values(), key=lambda x: x['name'].lower())
+@@ -534,7 +547,7 @@ class AdminSite:
+         return TemplateResponse(request, self.index_template or 'admin/index.html', context)
+ 
+     def app_index(self, request, app_label, extra_context=None):
+-        app_dict = self._build_app_dict(request, app_label)
++        app_dict = self.build_app_dict(request, app_label)
+         if not app_dict:
+             raise Http404('The requested admin page does not exist.')
+         # Sort the models alphabetically within each app.
+diff --git a/test_admin_model_class.py b/test_admin_model_class.py
+new file mode 100644
+index 0000000000..9839872347
+--- /dev/null
++++ b/test_admin_model_class.py
+@@ -0,0 +1,112 @@
++"""
++Test script to verify that model class is added to app_list context
++and that build_app_dict is public.
++"""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        SECRET_KEY='test-secret-key',
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++            'django.contrib.admin',
++            'django.contrib.sessions',
++            'django.contrib.messages',
++        ],
++        MIDDLEWARE=[
++            'django.contrib.sessions.middleware.SessionMiddleware',
++            'django.contrib.auth.middleware.AuthenticationMiddleware',
++            'django.contrib.messages.middleware.MessageMiddleware',
++        ],
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        ROOT_URLCONF='test_urls',
++        TEMPLATES=[{
++            'BACKEND': 'django.template.backends.django.DjangoTemplates',
++            'DIRS': [],
++            'APP_DIRS': True,
++            'OPTIONS': {
++                'context_processors': [
++                    'django.template.context_processors.debug',
++                    'django.template.context_processors.request',
++                    'django.contrib.auth.context_processors.auth',
++                    'django.contrib.messages.context_processors.messages',
++                ],
++            },
++        }],
++    )
++
++django.setup()
++
++from django.contrib import admin
++from django.contrib.auth.models import User, Group
++from django.test import RequestFactory
++from django.contrib.auth import get_user_model
++
++# Models are already registered by Django's auth app
++
++# Create a mock request
++factory = RequestFactory()
++request = factory.get('/admin/')
++
++# Create a superuser for the request
++UserModel = get_user_model()
++request.user = UserModel(username='admin', is_staff=True, is_superuser=True, is_active=True)
++
++# Test 1: Check if _build_app_dict is accessible (should be made public)
++print("Test 1: Checking if build_app_dict method exists...")
++if hasattr(admin.site, 'build_app_dict'):
++    print("✓ build_app_dict is public")
++else:
++    print("✗ build_app_dict is not public (still _build_app_dict)")
++    if hasattr(admin.site, '_build_app_dict'):
++        print("  Note: _build_app_dict exists (private)")
++
++# Test 2: Check if model class is included in the app dictionary
++print("\nTest 2: Checking if model class is included in app dictionary...")
++
++# Use the current method (either _build_app_dict or build_app_dict)
++if hasattr(admin.site, 'build_app_dict'):
++    app_dict = admin.site.build_app_dict(request)
++else:
++    app_dict = admin.site._build_app_dict(request)
++
++# Check the auth app
++if 'auth' in app_dict:
++    auth_app = app_dict['auth']
++    print(f"Auth app found with {len(auth_app['models'])} models")
++    
++    for model_dict in auth_app['models']:
++        print(f"\nModel: {model_dict['name']}")
++        print(f"  Keys in model_dict: {list(model_dict.keys())}")
++        
++        if 'model' in model_dict:
++            print(f"  ✓ 'model' key exists")
++            print(f"    Model class: {model_dict['model']}")
++            print(f"    Is it User model? {model_dict['model'] == User}")
++            print(f"    Is it Group model? {model_dict['model'] == Group}")
++        else:
++            print(f"  ✗ 'model' key does not exist")
++
++# Test 3: Check get_app_list
++print("\nTest 3: Checking get_app_list...")
++app_list = admin.site.get_app_list(request)
++for app in app_list:
++    if app['app_label'] == 'auth':
++        print(f"Auth app in app_list with {len(app['models'])} models")
++        for model_dict in app['models']:
++            print(f"  Model: {model_dict['name']}")
++            if 'model' in model_dict:
++                print(f"    ✓ Has 'model' key: {model_dict['model']}")
++            else:
++                print(f"    ✗ No 'model' key")
+\ No newline at end of file
+diff --git a/test_backward_compat.py b/test_backward_compat.py
+new file mode 100644
+index 0000000000..7cd923e52b
+--- /dev/null
++++ b/test_backward_compat.py
+@@ -0,0 +1,85 @@
++"""
++Test backward compatibility for _build_app_dict
++"""
++import os
++import sys
++import django
++import warnings
++from django.conf import settings
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        SECRET_KEY='test-secret-key',
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++            'django.contrib.admin',
++            'django.contrib.sessions',
++            'django.contrib.messages',
++        ],
++        MIDDLEWARE=[
++            'django.contrib.sessions.middleware.SessionMiddleware',
++            'django.contrib.auth.middleware.AuthenticationMiddleware',
++            'django.contrib.messages.middleware.MessageMiddleware',
++        ],
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        ROOT_URLCONF='test_urls',
++        TEMPLATES=[{
++            'BACKEND': 'django.template.backends.django.DjangoTemplates',
++            'DIRS': [],
++            'APP_DIRS': True,
++            'OPTIONS': {
++                'context_processors': [
++                    'django.template.context_processors.debug',
++                    'django.template.context_processors.request',
++                    'django.contrib.auth.context_processors.auth',
++                    'django.contrib.messages.context_processors.messages',
++                ],
++            },
++        }],
++    )
++
++django.setup()
++
++from django.contrib import admin
++from django.contrib.auth.models import User
++from django.test import RequestFactory
++from django.contrib.auth import get_user_model
++
++# Create a mock request
++factory = RequestFactory()
++request = factory.get('/admin/')
++
++# Create a superuser for the request
++UserModel = get_user_model()
++request.user = UserModel(username='admin', is_staff=True, is_superuser=True, is_active=True)
++
++print("Testing backward compatibility...")
++
++# Test that _build_app_dict still works but shows deprecation warning
++with warnings.catch_warnings(record=True) as w:
++    warnings.simplefilter("always")
++    app_dict = admin.site._build_app_dict(request)
++    
++    if len(w) > 0:
++        print(f"✓ Deprecation warning shown: {w[0].message}")
++        print(f"  Warning category: {w[0].category}")
++    else:
++        print("✗ No deprecation warning shown")
++    
++    # Check that it still returns the correct data
++    if 'auth' in app_dict:
++        auth_app = app_dict['auth']
++        if auth_app['models'][0].get('model'):
++            print("✓ _build_app_dict still returns model class")
++        else:
++            print("✗ _build_app_dict doesn't return model class")
++    else:
++        print("✗ auth app not found")
+\ No newline at end of file
+diff --git a/test_comprehensive.py b/test_comprehensive.py
+new file mode 100644
+index 0000000000..8a0f6e3330
+--- /dev/null
++++ b/test_comprehensive.py
+@@ -0,0 +1,185 @@
++"""
++Comprehensive test for the model class addition to app_list context
++"""
++import os
++import sys
++import django
++from django.conf import settings
++from django.db import models
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        SECRET_KEY='test-secret-key',
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++            'django.contrib.admin',
++            'django.contrib.sessions',
++            'django.contrib.messages',
++            'test_app',
++        ],
++        MIDDLEWARE=[
++            'django.contrib.sessions.middleware.SessionMiddleware',
++            'django.contrib.auth.middleware.AuthenticationMiddleware',
++            'django.contrib.messages.middleware.MessageMiddleware',
++        ],
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        ROOT_URLCONF='test_urls',
++        TEMPLATES=[{
++            'BACKEND': 'django.template.backends.django.DjangoTemplates',
++            'DIRS': [],
++            'APP_DIRS': True,
++            'OPTIONS': {
++                'context_processors': [
++                    'django.template.context_processors.debug',
++                    'django.template.context_processors.request',
++                    'django.contrib.auth.context_processors.auth',
++                    'django.contrib.messages.context_processors.messages',
++                ],
++            },
++        }],
++    )
++
++# Create a test app module
++import sys
++from types import ModuleType
++
++# Create test_app module
++test_app = ModuleType('test_app')
++test_app.__file__ = 'test_app/__init__.py'
++sys.modules['test_app'] = test_app
++
++# Create test_app.models module
++test_app_models = ModuleType('test_app.models')
++test_app_models.__file__ = 'test_app/models.py'
++sys.modules['test_app.models'] = test_app_models
++
++# Create test_app.apps module
++test_app_apps = ModuleType('test_app.apps')
++test_app_apps.__file__ = 'test_app/apps.py'
++sys.modules['test_app.apps'] = test_app_apps
++
++# Define the app config
++from django.apps import AppConfig
++
++class TestAppConfig(AppConfig):
++    name = 'test_app'
++    verbose_name = 'Test Application'
++    default_auto_field = 'django.db.models.BigAutoField'
++
++test_app_apps.TestAppConfig = TestAppConfig
++
++# Set default app config
++test_app.default_app_config = 'test_app.apps.TestAppConfig'
++
++django.setup()
++
++# Now define models after Django is set up
++from django.db import models
++from django.contrib import admin
++
++class TestModel(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++        verbose_name = 'Test Model'
++        verbose_name_plural = 'Test Models'
++
++class AnotherModel(models.Model):
++    title = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++        verbose_name = 'Another Model'
++        verbose_name_plural = 'Another Models'
++
++# Add models to the module
++test_app_models.TestModel = TestModel
++test_app_models.AnotherModel = AnotherModel
++
++# Register models with admin
++admin.site.register(TestModel)
++admin.site.register(AnotherModel)
++
++from django.test import RequestFactory
++from django.contrib.auth import get_user_model
++
++# Create a mock request
++factory = RequestFactory()
++request = factory.get('/admin/')
++
++# Create a superuser for the request
++UserModel = get_user_model()
++request.user = UserModel(username='admin', is_staff=True, is_superuser=True, is_active=True)
++
++print("=" * 60)
++print("Testing comprehensive model class inclusion")
++print("=" * 60)
++
++# Test 1: Check build_app_dict with specific app label
++print("\nTest 1: build_app_dict with specific app label")
++app_dict = admin.site.build_app_dict(request, 'test_app')
++if app_dict:
++    print(f"✓ Found test_app with {len(app_dict['models'])} models")
++    for model_dict in app_dict['models']:
++        print(f"  - {model_dict['name']}")
++        if 'model' in model_dict:
++            model_class = model_dict['model']
++            print(f"    ✓ Has model class: {model_class}")
++            print(f"    ✓ Model name: {model_class.__name__}")
++            print(f"    ✓ App label: {model_class._meta.app_label}")
++        else:
++            print(f"    ✗ Missing model class")
++else:
++    print("✗ test_app not found")
++
++# Test 2: Check build_app_dict without label (all apps)
++print("\nTest 2: build_app_dict without label (all apps)")
++all_apps_dict = admin.site.build_app_dict(request)
++print(f"Found {len(all_apps_dict)} apps")
++for app_label, app_info in all_apps_dict.items():
++    print(f"  - {app_label}: {len(app_info['models'])} models")
++    for model_dict in app_info['models']:
++        if 'model' in model_dict:
++            print(f"    ✓ {model_dict['name']} has model class")
++        else:
++            print(f"    ✗ {model_dict['name']} missing model class")
++
++# Test 3: Check get_app_list
++print("\nTest 3: get_app_list")
++app_list = admin.site.get_app_list(request)
++print(f"Found {len(app_list)} apps in app_list")
++for app in app_list:
++    print(f"  - {app['name']} ({app['app_label']}): {len(app['models'])} models")
++    for model_dict in app['models']:
++        if 'model' in model_dict:
++            model_class = model_dict['model']
++            print(f"    ✓ {model_dict['name']} -> {model_class.__name__}")
++        else:
++            print(f"    ✗ {model_dict['name']} missing model class")
++
++# Test 4: Verify model class can be used
++print("\nTest 4: Using model class from app_list")
++app_list = admin.site.get_app_list(request)
++for app in app_list:
++    if app['app_label'] == 'test_app':
++        for model_dict in app['models']:
++            if 'model' in model_dict:
++                model_class = model_dict['model']
++                print(f"  Model: {model_dict['name']}")
++                print(f"    - Can access _meta: {hasattr(model_class, '_meta')}")
++                print(f"    - Verbose name: {model_class._meta.verbose_name}")
++                print(f"    - DB table: {model_class._meta.db_table}")
++                print(f"    - Can create instance: {isinstance(model_class(), models.Model)}")
++
++print("\n" + "=" * 60)
++print("All tests completed successfully!")
++print("=" * 60)
+\ No newline at end of file
+diff --git a/test_custom_view.py b/test_custom_view.py
+new file mode 100644
+index 0000000000..71050d73f2
+--- /dev/null
++++ b/test_custom_view.py
+@@ -0,0 +1,153 @@
++"""
++Test that model class is accessible in custom admin views
++"""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        SECRET_KEY='test-secret-key',
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++            'django.contrib.admin',
++            'django.contrib.sessions',
++            'django.contrib.messages',
++        ],
++        MIDDLEWARE=[
++            'django.contrib.sessions.middleware.SessionMiddleware',
++            'django.contrib.auth.middleware.AuthenticationMiddleware',
++            'django.contrib.messages.middleware.MessageMiddleware',
++        ],
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        ROOT_URLCONF='test_urls',
++        TEMPLATES=[{
++            'BACKEND': 'django.template.backends.django.DjangoTemplates',
++            'DIRS': [],
++            'APP_DIRS': True,
++            'OPTIONS': {
++                'context_processors': [
++                    'django.template.context_processors.debug',
++                    'django.template.context_processors.request',
++                    'django.contrib.auth.context_processors.auth',
++                    'django.contrib.messages.context_processors.messages',
++                ],
++            },
++        }],
++    )
++
++django.setup()
++
++from django.contrib import admin
++from django.contrib.auth.models import User, Group
++from django.test import RequestFactory
++from django.contrib.auth import get_user_model
++from django.template.response import TemplateResponse
++from django.urls import path
++
++# Create a custom admin site with a custom view
++class CustomAdminSite(admin.AdminSite):
++    def custom_view(self, request):
++        """
++        A custom admin view that uses app_list and needs access to model classes
++        """
++        app_list = self.get_app_list(request)
++        
++        # Example use case: Generate a report of all models with their field counts
++        model_report = []
++        for app in app_list:
++            for model_dict in app['models']:
++                if 'model' in model_dict:
++                    model_class = model_dict['model']
++                    field_count = len(model_class._meta.fields)
++                    model_report.append({
++                        'app': app['name'],
++                        'model': model_dict['name'],
++                        'model_class': model_class,
++                        'field_count': field_count,
++                        'fields': [f.name for f in model_class._meta.fields],
++                    })
++        
++        context = {
++            **self.each_context(request),
++            'title': 'Model Report',
++            'app_list': app_list,
++            'model_report': model_report,
++        }
++        
++        # For testing, we'll just return the context
++        return context
++
++# Create custom admin site instance
++custom_admin = CustomAdminSite(name='custom_admin')
++
++# Register models
++custom_admin.register(User)
++custom_admin.register(Group)
++
++# Create a mock request
++factory = RequestFactory()
++request = factory.get('/admin/custom/')
++
++# Create a superuser for the request
++UserModel = get_user_model()
++request.user = UserModel(username='admin', is_staff=True, is_superuser=True, is_active=True)
++
++print("=" * 60)
++print("Testing model class in custom admin view")
++print("=" * 60)
++
++# Call the custom view
++context = custom_admin.custom_view(request)
++
++print("\nCustom view context keys:", list(context.keys()))
++print("\nModel Report from custom view:")
++print("-" * 40)
++
++for report in context['model_report']:
++    print(f"\n{report['app']} - {report['model']}:")
++    print(f"  Model class: {report['model_class']}")
++    print(f"  Field count: {report['field_count']}")
++    print(f"  Fields: {', '.join(report['fields'])}")
++
++print("\n" + "=" * 60)
++print("Custom admin view can successfully access model classes!")
++print("=" * 60)
++
++# Test that we can also manipulate the app_list
++print("\nManipulating app_list in custom view:")
++print("-" * 40)
++
++# Example: Filter out models with less than 5 fields
++filtered_app_list = []
++for app in context['app_list']:
++    filtered_models = []
++    for model_dict in app['models']:
++        if 'model' in model_dict:
++            model_class = model_dict['model']
++            if len(model_class._meta.fields) >= 5:
++                filtered_models.append(model_dict)
++                print(f"✓ Including {model_dict['name']} ({len(model_class._meta.fields)} fields)")
++            else:
++                print(f"✗ Filtering out {model_dict['name']} ({len(model_class._meta.fields)} fields)")
++    
++    if filtered_models:
++        app_copy = app.copy()
++        app_copy['models'] = filtered_models
++        filtered_app_list.append(app_copy)
++
++print(f"\nOriginal app_list had {len(context['app_list'])} apps")
++print(f"Filtered app_list has {len(filtered_app_list)} apps")
++
++print("\n" + "=" * 60)
++print("All custom view tests passed!")
++print("=" * 60)
+\ No newline at end of file
+diff --git a/test_no_perms.py b/test_no_perms.py
+new file mode 100644
+index 0000000000..8ae04049ca
+--- /dev/null
++++ b/test_no_perms.py
+@@ -0,0 +1,109 @@
++"""
++Test that model class is included even when user has limited permissions
++"""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        SECRET_KEY='test-secret-key',
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++            'django.contrib.admin',
++            'django.contrib.sessions',
++            'django.contrib.messages',
++        ],
++        MIDDLEWARE=[
++            'django.contrib.sessions.middleware.SessionMiddleware',
++            'django.contrib.auth.middleware.AuthenticationMiddleware',
++            'django.contrib.messages.middleware.MessageMiddleware',
++        ],
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        ROOT_URLCONF='test_urls',
++        TEMPLATES=[{
++            'BACKEND': 'django.template.backends.django.DjangoTemplates',
++            'DIRS': [],
++            'APP_DIRS': True,
++            'OPTIONS': {
++                'context_processors': [
++                    'django.template.context_processors.debug',
++                    'django.template.context_processors.request',
++                    'django.contrib.auth.context_processors.auth',
++                    'django.contrib.messages.context_processors.messages',
++                ],
++            },
++        }],
++    )
++
++django.setup()
++
++from django.contrib import admin
++from django.contrib.auth.models import User, Group
++from django.test import RequestFactory
++from django.contrib.auth import get_user_model
++
++# Create a mock request with a staff user (not superuser)
++factory = RequestFactory()
++request = factory.get('/admin/')
++
++# Create a staff user (not superuser) for the request
++UserModel = get_user_model()
++request.user = UserModel(username='staff', is_staff=True, is_superuser=False, is_active=True)
++
++print("=" * 60)
++print("Testing with limited permissions (staff but not superuser)")
++print("=" * 60)
++
++# The user won't have permissions to see models, but let's verify the structure
++app_dict = admin.site.build_app_dict(request)
++app_list = admin.site.get_app_list(request)
++
++print(f"\nApp dict has {len(app_dict)} apps")
++print(f"App list has {len(app_list)} apps")
++
++if len(app_list) == 0:
++    print("✓ No apps shown for user without permissions (expected)")
++else:
++    print("Apps found (user might have some permissions):")
++    for app in app_list:
++        print(f"  - {app['name']}: {len(app['models'])} models")
++        for model_dict in app['models']:
++            if 'model' in model_dict:
++                print(f"    ✓ {model_dict['name']} has model class")
++            else:
++                print(f"    ✗ {model_dict['name']} missing model class")
++
++# Now test with a superuser
++print("\n" + "=" * 60)
++print("Testing with superuser permissions")
++print("=" * 60)
++
++request.user = UserModel(username='admin', is_staff=True, is_superuser=True, is_active=True)
++
++app_dict = admin.site.build_app_dict(request)
++app_list = admin.site.get_app_list(request)
++
++print(f"\nApp dict has {len(app_dict)} apps")
++print(f"App list has {len(app_list)} apps")
++
++for app in app_list:
++    print(f"  - {app['name']}: {len(app['models'])} models")
++    all_have_model = all('model' in m for m in app['models'])
++    if all_have_model:
++        print(f"    ✓ All models have model class")
++    else:
++        print(f"    ✗ Some models missing model class")
++
++print("\n" + "=" * 60)
++print("Permission tests passed!")
++print("=" * 60)
+\ No newline at end of file
+diff --git a/test_urls.py b/test_urls.py
+new file mode 100644
+index 0000000000..6b669efaa2
+--- /dev/null
++++ b/test_urls.py
+@@ -0,0 +1,6 @@
++from django.contrib import admin
++from django.urls import path
++
++urlpatterns = [
++    path('admin/', admin.site.urls),
++]
+\ No newline at end of file

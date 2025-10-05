@@ -66,3 +66,16 @@ testing/overnight_*.json
 testing/baseline_*.jsonl
 testing/predictions_*.jsonl
 testing/errors_*.json
+
+# Evaluation logs (too large)
+logs/
+testing/*.log
+testing/*_overnight.log
+testing/*_console.log
+
+# SWE-agent trajectories (very large)
+SWE-agent/trajectories/
+
+# Temporary test files
+/tmp/
+*.pyc

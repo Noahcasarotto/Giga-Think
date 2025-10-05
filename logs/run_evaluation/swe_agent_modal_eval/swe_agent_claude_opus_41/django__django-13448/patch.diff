@@ -1,0 +1,341 @@
+diff --git a/django/db/backends/base/creation.py b/django/db/backends/base/creation.py
+index 503f7f56fd..ac9f4741c0 100644
+--- a/django/db/backends/base/creation.py
++++ b/django/db/backends/base/creation.py
+@@ -74,7 +74,9 @@ class BaseDatabaseCreation:
+         # and store it on the connection. This slightly horrific process is so people
+         # who are testing on databases without transactions or who are using
+         # a TransactionTestCase still get a clean database on every test run.
+-        if serialize:
++        # However, if MIGRATE is False, there's no data to serialize since
++        # no tables were created.
++        if serialize and self.connection.settings_dict['TEST']['MIGRATE']:
+             self.connection._test_serialized_contents = self.serialize_db_to_string()
+ 
+         call_command('createcachetable', database=self.connection.alias)
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 0000000000..a675c5a56b
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,49 @@
++#!/usr/bin/env python
++"""
++Script to reproduce the issue with TEST: {"MIGRATE": False} causing crashes.
++"""
++import os
++import sys
++import django
++from django.conf import settings
++from django.test.utils import setup_test_environment, setup_databases
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++            'TEST': {
++                'MIGRATE': False,  # This is the problematic setting
++                'SERIALIZE': True,  # Default value
++            }
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.admin',
++        'django.contrib.auth',
++        'django.contrib.contenttypes',
++        'django.contrib.sessions',
++        'django.contrib.messages',
++        'django.contrib.staticfiles',
++    ],
++    SECRET_KEY='test-secret-key',
++    USE_TZ=True,
++)
++
++django.setup()
++
++# Try to setup test databases
++print("Setting up test environment...")
++setup_test_environment()
++
++print("Setting up databases with MIGRATE=False...")
++try:
++    old_config = setup_databases(verbosity=2, interactive=False)
++    print("SUCCESS: Database setup completed without error!")
++except Exception as e:
++    print(f"ERROR: {type(e).__name__}: {e}")
++    import traceback
++    traceback.print_exc()
+\ No newline at end of file
+diff --git a/test_migrate_false.py b/test_migrate_false.py
+new file mode 100644
+index 0000000000..97471ec680
+--- /dev/null
++++ b/test_migrate_false.py
+@@ -0,0 +1,157 @@
++#!/usr/bin/env python
++"""
++Comprehensive test for the MIGRATE=False fix.
++"""
++import os
++import sys
++import django
++from django.conf import settings
++from django.test.utils import setup_test_environment, setup_databases, teardown_databases
++
++def test_migrate_false_serialize_true():
++    """Test with MIGRATE=False and SERIALIZE=True (default)"""
++    print("\n=== Test 1: MIGRATE=False, SERIALIZE=True ===")
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++                'TEST': {
++                    'MIGRATE': False,
++                    'SERIALIZE': True,  # Default value
++                }
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.admin',
++            'django.contrib.auth',
++            'django.contrib.contenttypes',
++        ],
++        SECRET_KEY='test-secret-key',
++        USE_TZ=True,
++    )
++    
++    django.setup()
++    setup_test_environment()
++    
++    try:
++        old_config = setup_databases(verbosity=0, interactive=False)
++        print("✓ Database setup completed successfully")
++        teardown_databases(old_config, verbosity=0)
++        return True
++    except Exception as e:
++        print(f"✗ Error: {e}")
++        return False
++
++def test_migrate_false_serialize_false():
++    """Test with MIGRATE=False and SERIALIZE=False"""
++    print("\n=== Test 2: MIGRATE=False, SERIALIZE=False ===")
++    
++    # Reset Django
++    from django.apps import apps
++    apps.app_configs = {}
++    apps.all_models = {}
++    apps.ready = False
++    
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++                'TEST': {
++                    'MIGRATE': False,
++                    'SERIALIZE': False,
++                }
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.admin',
++            'django.contrib.auth',
++            'django.contrib.contenttypes',
++        ],
++        SECRET_KEY='test-secret-key',
++        USE_TZ=True,
++    )
++    
++    django.setup()
++    setup_test_environment()
++    
++    try:
++        old_config = setup_databases(verbosity=0, interactive=False)
++        print("✓ Database setup completed successfully")
++        teardown_databases(old_config, verbosity=0)
++        return True
++    except Exception as e:
++        print(f"✗ Error: {e}")
++        return False
++
++def test_migrate_true_serialize_true():
++    """Test with MIGRATE=True and SERIALIZE=True (normal case)"""
++    print("\n=== Test 3: MIGRATE=True, SERIALIZE=True ===")
++    
++    # Reset Django
++    from django.apps import apps
++    apps.app_configs = {}
++    apps.all_models = {}
++    apps.ready = False
++    
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++                'TEST': {
++                    'MIGRATE': True,
++                    'SERIALIZE': True,
++                }
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.admin',
++            'django.contrib.auth',
++            'django.contrib.contenttypes',
++        ],
++        SECRET_KEY='test-secret-key',
++        USE_TZ=True,
++    )
++    
++    django.setup()
++    setup_test_environment()
++    
++    try:
++        old_config = setup_databases(verbosity=0, interactive=False)
++        print("✓ Database setup completed successfully")
++        
++        # Verify that serialization actually happened
++        from django.db import connections
++        connection = connections['default']
++        if hasattr(connection, '_test_serialized_contents'):
++            print("✓ Database was serialized as expected")
++        else:
++            print("✗ Database was not serialized (unexpected)")
++            return False
++            
++        teardown_databases(old_config, verbosity=0)
++        return True
++    except Exception as e:
++        print(f"✗ Error: {e}")
++        return False
++
++if __name__ == "__main__":
++    print("Testing MIGRATE=False fix...")
++    
++    results = []
++    results.append(test_migrate_false_serialize_true())
++    results.append(test_migrate_false_serialize_false())
++    results.append(test_migrate_true_serialize_true())
++    
++    print("\n=== Summary ===")
++    if all(results):
++        print("✓ All tests passed!")
++        sys.exit(0)
++    else:
++        print("✗ Some tests failed")
++        sys.exit(1)
+\ No newline at end of file
+diff --git a/test_migrate_false_simple.py b/test_migrate_false_simple.py
+new file mode 100644
+index 0000000000..3f4e3245b3
+--- /dev/null
++++ b/test_migrate_false_simple.py
+@@ -0,0 +1,99 @@
++#!/usr/bin/env python
++"""
++Simple test for the MIGRATE=False fix.
++"""
++import os
++import sys
++import subprocess
++
++def run_test(test_name, migrate, serialize):
++    """Run a test in a subprocess to avoid Django configuration issues"""
++    script = f"""
++import django
++from django.conf import settings
++from django.test.utils import setup_test_environment, setup_databases, teardown_databases
++
++settings.configure(
++    DEBUG=True,
++    DATABASES={{
++        'default': {{
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++            'TEST': {{
++                'MIGRATE': {migrate},
++                'SERIALIZE': {serialize},
++            }}
++        }}
++    }},
++    INSTALLED_APPS=[
++        'django.contrib.admin',
++        'django.contrib.auth',
++        'django.contrib.contenttypes',
++    ],
++    SECRET_KEY='test-secret-key',
++    USE_TZ=True,
++)
++
++django.setup()
++setup_test_environment()
++
++try:
++    old_config = setup_databases(verbosity=0, interactive=False)
++    
++    # Check if serialization happened when expected
++    from django.db import connections
++    connection = connections['default']
++    has_serialized = hasattr(connection, '_test_serialized_contents')
++    
++    # Expected: serialization should happen only when both MIGRATE and SERIALIZE are True
++    expected_serialized = {migrate} and {serialize}
++    
++    if has_serialized != expected_serialized:
++        if expected_serialized:
++            print("ERROR: Expected serialization but it didn't happen")
++            exit(1)
++        else:
++            print("ERROR: Unexpected serialization occurred")
++            exit(1)
++    
++    teardown_databases(old_config, verbosity=0)
++    print("SUCCESS")
++except Exception as e:
++    print(f"ERROR: {{e}}")
++    exit(1)
++"""
++    
++    result = subprocess.run([sys.executable, '-c', script], capture_output=True, text=True)
++    
++    print(f"\n=== Test: {test_name} ===")
++    print(f"MIGRATE={migrate}, SERIALIZE={serialize}")
++    
++    if result.returncode == 0:
++        print(f"✓ {result.stdout.strip()}")
++        return True
++    else:
++        print(f"✗ {result.stdout.strip()}")
++        if result.stderr:
++            print(f"  stderr: {result.stderr.strip()}")
++        return False
++
++if __name__ == "__main__":
++    print("Testing MIGRATE=False fix...")
++    
++    results = []
++    
++    # Test the problematic case that was failing before
++    results.append(run_test("MIGRATE=False, SERIALIZE=True", False, True))
++    
++    # Test other combinations
++    results.append(run_test("MIGRATE=False, SERIALIZE=False", False, False))
++    results.append(run_test("MIGRATE=True, SERIALIZE=True", True, True))
++    results.append(run_test("MIGRATE=True, SERIALIZE=False", True, False))
++    
++    print("\n=== Summary ===")
++    if all(results):
++        print("✓ All tests passed!")
++        sys.exit(0)
++    else:
++        print("✗ Some tests failed")
++        sys.exit(1)
+\ No newline at end of file
