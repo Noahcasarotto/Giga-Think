@@ -43,3 +43,26 @@ Thumbs.db
 # Test outputs
 test_outputs/
 
+
+# SWE-agent clone
+SWE-agent/
+
+# Virtual environments
+swe_venv/
+venv/
+env/
+
+# SWE-bench results and reports
+sb-cli-reports/
+*.json
+!package.json
+!tsconfig.json
+
+# Prediction files
+*.jsonl
+
+# Test outputs
+testing/overnight_*.json
+testing/baseline_*.jsonl
+testing/predictions_*.jsonl
+testing/errors_*.json
