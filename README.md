@@ -1,54 +1,84 @@
 # Giga-Think
 
-An implementation of IMO-level reasoning system based on iterative verification and refinement.
+IMO-level reasoning system with comprehensive SWE-bench evaluation.
 
-## Setup
+## 🎯 Project Status
 
-1. Install dependencies:
-```bash
-pip install -r requirements.txt
+### ✅ Complete & Working
+- **8 Models** configured (Grok, GPT-5, Claude, Gemini via OpenRouter)
+- **Baseline Pipeline**: 6% success (Claude Opus 4.1 best)
+- **SWE-Agent Pipeline**: 33% success (5.5x improvement!)
+- **Modal Cloud Integration**: Full evaluation without local Docker
+- **400+ Problems Tested**: Comprehensive benchmarking
+
+### ⏳ In Progress
+- **IMO Reasoning Pipeline**: solve → verify → correct → iterate (Next phase)
+
+## 📊 Benchmark Results
+
+```
+Baseline (Blind Patching):     6% (3/50)  - $0.03/problem
+SWE-Agent (Full Agentic):     33% (3/9)   - $9.64/problem
+Improvement:                   5.5x better (+27pp)
 ```
 
-2. Copy `.env.example` to `.env` and add your OpenRouter API key:
-```bash
-cp .env.example .env
+See [docs/RESULTS.md](docs/RESULTS.md) for full details.
+
+## 🏗️ Project Structure
+
+```
+core/               # Reusable modules (models, client)
+baselines/          # Baseline testing approaches  
+reasoning/          # IMO reasoning pipeline (to build)
+evaluation/         # Evaluation utilities
+scripts/            # CLI tools
+docs/               # Documentation
+results/            # Archived benchmark results
+SWE-agent/          # Full agentic framework
 ```
 
-3. Get your OpenRouter API key:
-   - Visit https://openrouter.ai/keys
-   - Sign up or log in
-   - Create a new API key
-   - Add it to `.env` as `OPENROUTER_API_KEY`
+## 🚀 Quick Start
 
-## Testing OpenRouter Connection
-
-Test the API and see available models:
-
+### Test Baseline
 ```bash
-python test_openrouter.py
+python3 -m baselines.simple_baseline
 ```
 
-This will:
-- Verify your API key works
-- Show recommended models for math reasoning
-- Optionally test a model with a simple problem
+### Run SWE-Agent
+```bash
+source swe_venv/bin/activate
+./scripts/run_swe_agent.sh
+```
 
-## Architecture
+### View Results
+```bash
+./scripts/show_results.sh
+```
 
-Based on the solve → self-improve → verify → correct → re-verify loop:
-1. **Solver** - Rigor-first prompting with structured output
-2. **Self-improvement** - Inject additional reasoning budget
-3. **Verifier** - Strict grader producing bug reports
-4. **Correction loop** - Address feedback iteratively
-5. **Multi-verification acceptance** - 5x independent verification before accepting
+## 📚 Documentation
 
-## Project Status
+- [Architecture Overview](docs/PIPELINE_SWE_AGENT.md)
+- [Baseline Pipeline](docs/PIPELINE_BASELINE.md)
+- [Results & Benchmarks](docs/RESULTS.md)
 
-- [ ] API connections and basic testing
-- [ ] Solver prompt implementation
-- [ ] Verifier prompt implementation
-- [ ] Self-improvement pass
-- [ ] Correction loop
-- [ ] Multi-verification gate
-- [ ] Parallel attempt orchestration
+## 💰 Costs
 
+- **OpenRouter API**: $0.03-10/problem (depending on approach)
+- **Modal Cloud**: $0.50-1/problem (evaluation)
+- **sb-cli**: FREE (quota-limited)
+
+## 🔑 Setup
+
+1. Copy `.env.example` to `.env`
+2. Add your API keys:
+   - `OPENROUTER_API_KEY`
+   - `SWEBENCH_API_KEY` (optional, for sb-cli)
+3. Install: `pip install -r requirements.txt`
+
+## 🎯 Next Phase: IMO Reasoning
+
+Build the verification and correction loops to improve 33% → 50-70%+
+
+---
+
+**Repository**: https://github.com/Noahcasarotto/Giga-Think

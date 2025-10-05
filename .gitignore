@@ -79,3 +79,19 @@ SWE-agent/trajectories/
 # Temporary test files
 /tmp/
 *.pyc
+
+# Keep structure clean
+*.jsonl
+*.log
+*_overnight.json
+*_console.log
+
+# Large evaluation outputs
+logs/
+testing/*.log
+testing/*_overnight.*
+testing/*_console.*
+
+# Keep only essential result summaries
+!results/*.json
+!results/*.md
